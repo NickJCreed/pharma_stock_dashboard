@@ -64,18 +64,38 @@ def load_data(uploaded_file):
             st.error("Error: 'Sales Date' or 'Sales Time' column not found after renaming.")
             return None, None
             
+        # --- [DEBUG] Print raw dates and types ---
+        print("--- [DEBUG] Raw 'Sales Date' and 'Sales Time' (head) ---")
+        print(df[['Sales Date', 'Sales Time']].head())
+        print("\n--- [DEBUG] Data types of 'Sales Date' and 'Sales Time' ---")
+        print(df[['Sales Date', 'Sales Time']].dtypes)
+        # --- End Debug ---
+
         # Convert time to string just in case it's read as a time object
         df['Sales Time'] = df['Sales Time'].astype(str)
         
         df['datetime'] = pd.to_datetime(
             df['Sales Date'].astype(str).str.split(' ').str[0] + ' ' + df['Sales Time'], 
             errors='coerce',
-            # We assume DD/MM/YYYY based on our previous work
-            dayfirst=True 
+            # dayfirst=True  # <-- REMOVED. This was the cause of the parsing error.
+                             # Pandas will now correctly auto-detect YYYY-MM-DD
         )
+        
+        # --- [DEBUG] Print parsed dates ---
+        print("\n--- [DEBUG] 'datetime' column after parsing (head) ---")
+        print(df['datetime'].head())
+        print(f"--- [DEBUG] Is 'datetime' column all NaT? {df['datetime'].isna().all()} ---")
+        # --- End Debug ---
         
         # 2. Drop rows where date/time conversion failed
         df.dropna(subset=['datetime'], inplace=True)
+        
+        if df.empty:
+            print("--- [DEBUG] DataFrame is EMPTY after dropping NaT datetimes. All date parsing failed. ---")
+            st.error("Error: All date parsing failed. Please check your source file's date format.")
+            return None, 1 # Return 1 for num_days to avoid crash
+        else:
+            print(f"--- [DEBUG] Min Date after dropna: {df['datetime'].min()}, Max Date after dropna: {df['datetime'].max()} ---")
         
         # 3. Extract day of week and hour
         df['day_of_week'] = df['datetime'].dt.day_name()
@@ -100,11 +120,20 @@ def load_data(uploaded_file):
         
         df.dropna(subset=['Total Profit', 'Quantity Sold', 'Invoice No'], inplace=True)
         
-        # Get date range for inventory calculations
-        num_days = (df['datetime'].max() - df['datetime'].min()).days
+        # --- Get date range for inventory calculations ---
+        
+        # **THE FIX**: Calculate the number of *unique days* with sales,
+        # not the total time span. This is robust to outlier dates.
+        num_days = df['datetime'].dt.date.nunique()
+        
         if num_days == 0:
             num_days = 1 # Avoid division by zero if only one day of data
 
+        # Add a message to the sidebar to debug the date range
+        st.sidebar.info(f"Date range found: {df['datetime'].min().date()} to {df['datetime'].max().date()}")
+        st.sidebar.success(f"Calculating velocity based on **{num_days}** unique sales day(s).")
+        print(f"--- [DEBUG] num_days calculated as: {num_days} ---")
+        
         return df, num_days
 
     except Exception as e:
@@ -557,7 +586,8 @@ else:
                         
                         # We must check if df_stock is valid *before* we try to use it
                         if df_stock is not None:
-                            print(df_stock.head()) # Moved this
+                            # We are using the print statements you added in the prompt
+                            print(df_stock.head()) 
                             
                             # Merge sales velocity (inventory_stats) with current stock (df_stock)
                             # We use a 'left' merge to start from what we've sold.
