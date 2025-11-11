@@ -54,6 +54,9 @@ def load_data(uploaded_file):
         # 4. Rename columns by their position
         df.columns = SALES_COLUMN_NAMES
 
+        # 5. Rename to match script's internal names
+        df.rename(columns=SALES_COLUMNS_RENAME_MAP, inplace=True)
+
         # --- Critical Data Preprocessing (This part is identical to before) ---
         
         # 1. Combine Date and Time and create datetime object
