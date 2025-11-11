@@ -15,27 +15,60 @@ st.set_page_config(
 # --- Helper Function to Load Data ---
 @st.cache_data
 def load_data(uploaded_file):
-    """Loads and preprocesses the uploaded sales data."""
-    try:
-        # Read the file from the upload
-        content = uploaded_file.getvalue().decode('utf-8')
-        
-        # --- FIX: Use sep=',' as indicated by the df.columns output ---
-        # The previous try/except was incorrect. The
-        # df.columns output clearly shows it's a CSV.
-        df = pd.read_csv(io.StringIO(content), sep=',')
+    """Loads and preprocesses the uploaded sales XLSX file."""
 
-        # --- Critical Data Preprocessing ---
+    # The 26 columns from your sales file, in order.
+    SALES_COLUMN_NAMES = [
+        "No", "Branch", "Customer/Debtor", "Sales Invoice No", "Sale Date", 
+        "Sale Time", "Salesperson", "Product Barcode", "Product Code", 
+        "Product Name", "Unit", "Quantity Sold", "Unit Price Before Discount", 
+        "Discount per Unit", "Unit Price After Discount", "Cost per Unit", 
+        "Profit per Unit", "Total Before Discount", "Total Discount", 
+        "Total After Discount", "Total Cost", "Total Profit", "Profit %", 
+        "Markup %", "Added By", "Status"
+    ]
+    
+    # Map from your names to the names the script expects
+    SALES_COLUMNS_RENAME_MAP = {
+        "Sale Date": "Sales Date",
+        "Sale Time": "Sales Time",
+        "Sales Invoice No": "Invoice No",
+        "Total Before Discount": "Total Price Before Discount",
+        "Total After Discount": "Total Price After Discount"
+        # Any names that already match (e.g., "Product Name") don't need to be here
+    }
+
+    try:
+        # 1. Read the Excel file (first sheet, first row is header)
+        df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
+        
+        # 2. Critical Check: Ensure column count matches
+        if len(df.columns) != len(SALES_COLUMN_NAMES):
+            st.error(f"Error: The uploaded sales file has {len(df.columns)} columns, but the dashboard expects {len(SALES_COLUMN_NAMES)}.")
+            st.error("Please ensure you've uploaded the correct, unmodified sales export.")
+            return None, None
+            
+        # 3. Rename columns by their position
+        df.columns = SALES_COLUMN_NAMES
+        
+        # 4. Rename to match script's internal names
+        df.rename(columns=SALES_COLUMNS_RENAME_MAP, inplace=True)
+
+        # --- Critical Data Preprocessing (This part is identical to before) ---
         
         # 1. Combine Date and Time and create datetime object
         if 'Sales Date' not in df.columns or 'Sales Time' not in df.columns:
-            st.error("Error: 'Sales Date' or 'Sales Time' column not found.")
+            st.error("Error: 'Sales Date' or 'Sales Time' column not found after renaming.")
             return None, None
             
+        # Convert time to string just in case it's read as a time object
+        df['Sales Time'] = df['Sales Time'].astype(str)
+        
         df['datetime'] = pd.to_datetime(
-            df['Sales Date'] + ' ' + df['Sales Time'], 
+            df['Sales Date'].astype(str).str.split(' ').str[0] + ' ' + df['Sales Time'], 
             errors='coerce',
-            dayfirst=True # Assuming format is DD/MM/YYYY
+            # We assume DD/MM/YYYY based on our previous work
+            dayfirst=True 
         )
         
         # 2. Drop rows where date/time conversion failed
@@ -62,7 +95,7 @@ def load_data(uploaded_file):
             st.warning("Warning: 'Invoice No' not found. Using row index for transaction counting.")
             df['Invoice No'] = df.index
         
-        df.dropna(subset=['Total Profit', 'Quantity Sold'], inplace=True)
+        df.dropna(subset=['Total Profit', 'Quantity Sold', 'Invoice No'], inplace=True)
         
         # Get date range for inventory calculations
         num_days = (df['datetime'].max() - df['datetime'].min()).days
@@ -72,41 +105,43 @@ def load_data(uploaded_file):
         return df, num_days
 
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Error loading sales data: {e}")
+        st.error("Please ensure 'openpyxl' is installed (`pip install openpyxl`) and the file is a valid .xlsx file.")
         return None, None
-
+        
 @st.cache_data
 def load_stock_data(stock_file):
-    """Loads and processes the uploaded stock data file."""
+    """Loads and processes the uploaded stock XLSX file."""
+
+    # The 32 columns from your stock file, in order.
+    STOCK_COLUMN_NAMES = [
+        "No.", "Branch Name", "Main Supplier", "Product Code", "Barcode", 
+        "Product Name", "Stock", "Average Cost", "Selling Price 1", "Profit", 
+        "Profit %", "Total Sales (1)", "Total Cost", "Total Profit", "Unit", 
+        "Account Period Cost", "Latest Purchase Cost", "Total Stock (All Units)", 
+        "Generic Drug Name", "Storage", "Product Type", "Product Group", "Brand", 
+        "Selling Price 2", "Selling Price 3", "Selling Price 4", "Selling Price 5", 
+        "Tax Exempt Product", "Decimal Places", "Status", "Name 2", "Name 3"
+    ]
+    
     try:
-        content = stock_file.getvalue().decode('utf-8')
+        # 1. Read the Excel file
+        df = pd.read_excel(stock_file, sheet_name=0, header=0)
+
+        # 2. Critical Check: Ensure column count matches
+        if len(df.columns) != len(STOCK_COLUMN_NAMES):
+            st.error(f"Error: The uploaded stock file has {len(df.columns)} columns, but the dashboard expects {len(STOCK_COLUMN_NAMES)}.")
+            st.error("Please ensure you've uploaded the correct, unmodified stock export.")
+            return None
+            
+        # 3. Rename columns by their position
+        df.columns = STOCK_COLUMN_NAMES
         
-        # --- FIX: Try loading as CSV first (based on new data snippet) ---
-        try:
-            # Use skipinitialspace=True to handle spaces after commas
-            df = pd.read_csv(io.StringIO(content), sep=',', skipinitialspace=True)
-            # Clean column names just in case (e.g. ' Stock ' -> 'Stock')
-            df.columns = df.columns.str.strip()
-        except Exception:
-            # Fallback if CSV parsing fails
-            df = pd.DataFrame() # Create empty df
-
-        # --- Check for required columns, if not found, try TSV ---
-        if 'Barcode' not in df.columns or 'Stock' not in df.columns:
-            try:
-                # Try with tab, also with new settings
-                df = pd.read_csv(io.StringIO(content), sep='\t', skipinitialspace=True)
-                # Clean column names
-                df.columns = df.columns.str.strip()
-            except Exception as e:
-                st.error(f"Error parsing file: {e}. Could not read as CSV or TSV.")
-                return None
-
         # --- Final check ---
-        if 'Barcode' not in df.columns or 'Stock' not in df.columns:
-            st.error("Stock file missing 'Barcode' or 'Stock' columns. Make sure it's a CSV or Tab-separated file.")
-            # Add debug info
-            st.error(f"Columns found: {list(df.columns)}")
+        # The script needs 'Barcode', 'Stock', 'Product Name'.
+        # Your provided list contains these exact names, so no rename map is needed.
+        if 'Barcode' not in df.columns or 'Stock' not in df.columns or 'Product Name' not in df.columns:
+            st.error("Stock file is missing 'Barcode', 'Stock', or 'Product Name' after renaming. Please check the column order.")
             return None
         
         # --- Select and clean required columns ---
@@ -135,7 +170,7 @@ def load_stock_data(stock_file):
     except Exception as e:
         st.error(f"Error loading stock data: {e}. Please ensure it's a CSV or TSV file.")
         return None
-    
+        
 @st.cache_data
 def get_transaction_kpis(df):
     """Calculates key transaction KPIs."""
@@ -180,8 +215,8 @@ st.title("🛒 Sales & Inventory Dashboard")
 
 # --- Sidebar for File Upload ---
 st.sidebar.header("Upload Your Data")
-uploaded_file = st.sidebar.file_uploader("1. Upload Sales Data (.csv, .txt)", type=["txt", "csv"])
-stock_file = st.sidebar.file_uploader("2. Upload Stock Data (.csv, .txt)", type=["txt", "csv"])
+uploaded_file = st.sidebar.file_uploader("1. Upload Sales Data (.xlsx)", type=["xlsx"])
+stock_file = st.sidebar.file_uploader("2. Upload Stock Data (.xlsx)", type=["xlsx"])
 
 if uploaded_file is None:
     st.info("Please upload your sales data file using the sidebar to get started.")
