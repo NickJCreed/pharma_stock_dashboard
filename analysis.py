@@ -544,10 +544,11 @@ else:
                     else:
                         # Load stock data
                         df_stock = load_stock_data(stock_file)
-                        df_stock['Barcode'] = pd.to_numeric(df_stock['Barcode'], errors='coerce').astype(str)
-                        print(df_stock.head())
                         
+                        # We must check if df_stock is valid *before* we try to use it
                         if df_stock is not None:
+                            print(df_stock.head()) # Moved this
+                            
                             # Merge sales velocity (inventory_stats) with current stock (df_stock)
                             # We use a 'left' merge to start from what we've sold.
                             df_merged = pd.merge(
