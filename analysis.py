@@ -155,14 +155,16 @@ def load_stock_data(stock_file):
         df_stock['Stock'] = pd.to_numeric(df_stock['Stock'], errors='coerce')
 
         # --- FIX: Convert Barcode from float to int to string ---
-        # 1. Convert to numeric (handles floats and potential strings)
+        # 1. Convert to string and strip whitespace
+        df_stock['Barcode'] = df_stock['Barcode'].astype(str).str.strip()
+        
+        # 2. Convert to numeric to standardize (handles floats, ints, and strings-of-ints)
         df_stock['Barcode'] = pd.to_numeric(df_stock['Barcode'], errors='coerce')
 
-        # 2. Drop rows where barcode/stock couldn't be converted
+        # 3. Drop rows where barcode/stock couldn't be converted
         df_stock.dropna(subset=['Stock', 'Barcode'], inplace=True)
 
-        # 3. Convert to integer (to remove '.0') then to string
-        # We use 'Int64' as it can handle potential missing values
+        # 4. Convert to integer (to remove '.0') then to string
         df_stock['Barcode'] = df_stock['Barcode'].astype('Int64').astype(str)
         
         # In case a barcode is listed multiple times, sum its stock
@@ -434,18 +436,20 @@ else:
                 ).reset_index()
                 
                 # --- Rename 'Product Barcode' to 'Barcode' for merging ---
-                # --- Rename 'Product Barcode' to 'Barcode' for merging ---
                 if 'Product Barcode' in inventory_stats.columns:
                     inventory_stats.rename(columns={'Product Barcode': 'Barcode'}, inplace=True)
                     
-                    # --- FIX: Convert Barcode from float/int to string ---
-                    # 1. Convert to numeric
+                    # --- FIX: Robust Barcode Cleaning ---
+                    # 1. Convert to string and strip whitespace
+                    inventory_stats['Barcode'] = inventory_stats['Barcode'].astype(str).str.strip()
+                    
+                    # 2. Convert to numeric to standardize
                     inventory_stats['Barcode'] = pd.to_numeric(inventory_stats['Barcode'], errors='coerce')
                     
-                    # 2. Drop NaNs created by conversion
+                    # 3. Drop NaNs created by conversion
                     inventory_stats.dropna(subset=['Barcode'], inplace=True)
                     
-                    # 3. Convert to integer (to remove '.0') then to string
+                    # 4. Convert to integer (to remove '.0') then to string
                     inventory_stats['Barcode'] = inventory_stats['Barcode'].astype('Int64').astype(str)
 
                 # Calculate sales velocity
