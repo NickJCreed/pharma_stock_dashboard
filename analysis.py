@@ -42,17 +42,17 @@ def load_data(uploaded_file):
         # 1. Read the Excel file (first sheet, first row is header)
         df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
         
-        # 2. Critical Check: Ensure column count matches
-        if len(df.columns) != len(SALES_COLUMN_NAMES):
-            st.error(f"Error: The uploaded sales file has {len(df.columns)} columns, but the dashboard expects {len(SALES_COLUMN_NAMES)}.")
+        # 2. Critical Check: Ensure we have AT LEAST the expected columns
+        if len(df.columns) < len(SALES_COLUMN_NAMES):
+            st.error(f"Error: The uploaded sales file has only {len(df.columns)} columns, but the dashboard expects at least {len(SALES_COLUMN_NAMES)}.")
             st.error("Please ensure you've uploaded the correct, unmodified sales export.")
             return None, None
             
-        # 3. Rename columns by their position
-        df.columns = SALES_COLUMN_NAMES
+        # 3. Slice the df to only include the columns we want (removes extra blank columns)
+        df = df.iloc[:, :len(SALES_COLUMN_NAMES)]
         
-        # 4. Rename to match script's internal names
-        df.rename(columns=SALES_COLUMNS_RENAME_MAP, inplace=True)
+        # 4. Rename columns by their position
+        df.columns = SALES_COLUMN_NAMES
 
         # --- Critical Data Preprocessing (This part is identical to before) ---
         
@@ -128,13 +128,16 @@ def load_stock_data(stock_file):
         # 1. Read the Excel file
         df = pd.read_excel(stock_file, sheet_name=0, header=0)
 
-        # 2. Critical Check: Ensure column count matches
-        if len(df.columns) != len(STOCK_COLUMN_NAMES):
-            st.error(f"Error: The uploaded stock file has {len(df.columns)} columns, but the dashboard expects {len(STOCK_COLUMN_NAMES)}.")
+        # 2. Critical Check: Ensure we have AT LEAST the expected columns
+        if len(df.columns) < len(STOCK_COLUMN_NAMES):
+            st.error(f"Error: The uploaded stock file has only {len(df.columns)} columns, but the dashboard expects at least {len(STOCK_COLUMN_NAMES)}.")
             st.error("Please ensure you've uploaded the correct, unmodified stock export.")
             return None
             
-        # 3. Rename columns by their position
+        # 3. Slice the df to only include the columns we want (removes extra blank columns)
+        df = df.iloc[:, :len(STOCK_COLUMN_NAMES)]
+        
+        # 4. Rename columns by their position
         df.columns = STOCK_COLUMN_NAMES
         
         # --- Final check ---
