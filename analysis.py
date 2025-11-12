@@ -572,12 +572,14 @@ else:
                             # Replaced st.pyplot with interactive plot_components_plotly
                             fig_components_plotly = plot_components_plotly(m, forecast)
 
-                            # --- NEW ---
+                            # --- NEW (AND CORRECTED) ---
                             # Filter the x-axis of the 'daily' seasonality plot (which is in row 3)
                             # to show only business hours 9 AM to 8 PM (20:00).
+                            # This axis uses a 'timedelta' object, not a simple string.
                             try:
                                 fig_components_plotly.update_xaxes(
-                                    range=['09:00:00', '20:00:00'], # Set range from 9 AM to 8 PM
+                                    # We must provide the range as 'timedelta' objects
+                                    range=[pd.to_timedelta('09:00:00'), pd.to_timedelta('20:00:00')],
                                     row=3,  # The 'daily' plot is the 3rd one
                                     col=1
                                 )
