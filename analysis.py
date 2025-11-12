@@ -487,7 +487,7 @@ else:
                 
                 # Add stocking suggestion
                 st.subheader("Stocking Suggestions")
-                lead_time_weeks = st.number_input("How many weeks of stock do you want to keep on hand? (Safety Stock)", min_value=1, max_value=12, value=2, step=1)
+                lead_time_weeks = st.number_input("How many weeks of stock do you want to keep on hand? (Safety Stock)", min_value=1, max_value=12, value=3, step=1)
                 
                 inventory_stats['suggested_stock_level'] = inventory_stats['avg_weekly_sales'] * lead_time_weeks
                 
