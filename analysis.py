@@ -359,11 +359,11 @@ else:
     else:
         # --- Create Tabs ---
         tab_list = [
-            "🔥 Busiest Times Heatmap", 
+            "📈 Overall Trend & Forecasting",  # <-- MOVED TO FIRST
+            "🔥 Busiest Times Heatmap",      # <-- MOVED TO SECOND
             "🏆 Product Performance", 
             "🛒 Customer Purchase Insights", 
-            "📦 Inventory Insights",
-            "📈 Overall Trend & Forecasting"
+            "📦 Inventory Insights"
         ]
         
         # Dynamically add the new tab if stock file is present
@@ -372,8 +372,114 @@ else:
         
         tabs = st.tabs(tab_list)
 
-        # --- Tab 1: Busiest Times Heatmap ---
+        # --- Tab 1: Overall Trend & Forecasting (NEW FIRST TAB) ---
         with tabs[0]:
+            st.header("Overall Sales Trend & Forecasting")
+
+            # --- [NEW] Top-Level KPIs ---
+            st.subheader("Period-Wide KPIs")
+            st.markdown("These metrics reflect the *entire filtered dataset*.")
+            
+            # 1. Calculate main totals
+            total_revenue = df_filtered['Total Price After Discount'].sum()
+            total_profit = df_filtered['Total Profit'].sum()
+            total_cost = df_filtered['Total Cost'].sum()
+
+            # 2. Calculate daily stats for growth %
+            df_daily_sales = df_filtered.groupby(df_filtered['datetime'].dt.date) \
+                                      .agg(daily_sales=('Total Price After Discount', 'sum')) \
+                                      .reset_index()
+            df_daily_sales = df_daily_sales.rename(columns={'datetime': 'date'})
+            
+            avg_daily_growth_pct = 0.0
+            if len(df_daily_sales) > 1:
+                df_daily_sales.sort_values(by='date', inplace=True)
+                # Calculate percentage change from the previous day
+                daily_growth = df_daily_sales['daily_sales'].pct_change()
+                # Get the average of these changes
+                avg_daily_growth_pct = daily_growth.mean() * 100 # as a percentage
+                if pd.isna(avg_daily_growth_pct):
+                    avg_daily_growth_pct = 0.0
+            
+            # 3. Get transaction KPIs
+            aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
+
+            # 4. Display KPIs in columns
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
+            col2.metric("Total Profit", f"฿{total_profit:,.2f}")
+            col3.metric("Total Cost", f"฿{total_cost:,.2f}")
+            
+            col4, col5, col6 = st.columns(3)
+            col4.metric("Total Transactions", f"{total_tx:,}")
+            col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
+            col6.metric("Avg. Daily Growth", f"{avg_daily_growth_pct:,.2f}%")
+            
+            st.markdown("---") # Separator
+
+            # --- 1. Prepare data for Trend Plot ---
+            st.subheader("Overall Daily Sales Trend")
+            # The df_daily_sales calculation is already done above for the KPIs
+
+            # Plot overall trend
+            fig_trend = px.line(
+                df_daily_sales,
+                x='date',
+                y='daily_sales',
+                title="Total Daily Sales Over Time",
+                labels={'date': 'Date', 'daily_sales': 'Total Sales (฿)'}
+            )
+            fig_trend.update_layout(xaxis_title="Date", yaxis_title="Total Sales (฿)")
+            st.plotly_chart(fig_trend, use_container_width=True)
+
+            # --- 2. Prophet Forecasting ---
+            st.subheader("Sales Forecast with Prophet")
+            
+            # Format for Prophet: needs 'ds' and 'y'
+            df_prophet = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
+            
+            # Check for sufficient data
+            if len(df_prophet) < 5:
+                st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
+            else:
+                # Forecasting parameters
+                forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
+                
+                # Cache the forecast function
+                @st.cache_data
+                def get_prophet_forecast(data, periods):
+                    m = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
+                    m.fit(data)
+                    future = m.make_future_dataframe(periods=periods)
+                    forecast = m.predict(future)
+                    return m, forecast
+
+                # Run forecast
+                with st.spinner(f"Generating {forecast_days}-day forecast..."):
+                    try:
+                        m, forecast = get_prophet_forecast(df_prophet, forecast_days)
+                        
+                        st.subheader(f"{forecast_days}-Day Sales Forecast")
+                        fig_forecast = plot_plotly(m, forecast)
+                        fig_forecast.update_layout(
+                            title=f"Daily Sales Forecast",
+                            xaxis_title="Date",
+                            yaxis_title="Forecasted Sales (฿)"
+                        )
+                        st.plotly_chart(fig_forecast, use_container_width=True)
+                        
+                        st.subheader("Forecast Components")
+                        # Prophet's component plot uses matplotlib, so we use st.pyplot
+                        fig_components = m.plot_components(forecast)
+                        st.pyplot(fig_components)
+                    
+                    except Exception as e:
+                        st.error(f"An error occurred during forecasting: {e}")
+                        st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
+
+
+        # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
+        with tabs[1]:
             st.header("Busiest Times Heatmap")
             st.markdown("This heatmap shows the number of unique transactions per hour and day of the week.")
             
@@ -418,8 +524,8 @@ else:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        # --- Tab 2: Product Performance ---
-        with tabs[1]:
+        # --- Tab 3: Product Performance ---
+        with tabs[2]:
             st.header("Product Performance")
             st.markdown(f"Analyzed over **{num_days}** days of sales.")
             
@@ -477,12 +583,14 @@ else:
             with st.expander("View All Product Performance Data"):
                 st.dataframe(sorted_products, use_container_width=True)
 
-        # --- Tab 3: Customer Purchase Insights ---
-        with tabs[2]:
+        # --- Tab 4: Customer Purchase Insights ---
+        with tabs[3]:
             st.header("🛒 Customer Purchase Insights")
             st.markdown("Understand how customers bundle items in a single transaction.")
             
             # --- 1. Calculate and display KPIs ---
+            # Note: AOV and Total_TX are already calculated on Tab 1, but it's good
+            # to show them here in context as well.
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
             st.subheader("High-Level Metrics")
             
@@ -524,8 +632,8 @@ else:
                     fig_co.update_layout(yaxis=dict(autorange="reversed")) # Show top item at the top
                     st.plotly_chart(fig_co, use_container_width=True)
 
-        # --- Tab 4: Inventory Insights ---
-        with tabs[3]:
+        # --- Tab 5: Inventory Insights ---
+        with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
             st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
             
@@ -572,74 +680,6 @@ else:
                 }
             )
         
-        # --- Tab 5: Overall Trend & Forecasting ---
-        with tabs[4]:
-            st.header("Overall Sales Trend & Forecasting")
-            
-            # --- 1. Prepare data for Trend Plot ---
-            st.subheader("Overall Daily Sales Trend")
-            # Group by date part of datetime
-            df_daily_sales = df_filtered.groupby(df_filtered['datetime'].dt.date) \
-                                      .agg(daily_sales=('Total Price After Discount', 'sum')) \
-                                      .reset_index()
-            df_daily_sales = df_daily_sales.rename(columns={'datetime': 'date'})
-
-            # Plot overall trend
-            fig_trend = px.line(
-                df_daily_sales,
-                x='date',
-                y='daily_sales',
-                title="Total Daily Sales Over Time",
-                labels={'date': 'Date', 'daily_sales': 'Total Sales (฿)'}
-            )
-            fig_trend.update_layout(xaxis_title="Date", yaxis_title="Total Sales (฿)")
-            st.plotly_chart(fig_trend, use_container_width=True)
-
-            # --- 2. Prophet Forecasting ---
-            st.subheader("Sales Forecast with Prophet")
-            
-            # Format for Prophet: needs 'ds' and 'y'
-            df_prophet = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
-            
-            # Check for sufficient data
-            if len(df_prophet) < 5:
-                st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
-            else:
-                # Forecasting parameters
-                forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
-                
-                # Cache the forecast function
-                @st.cache_data
-                def get_prophet_forecast(data, periods):
-                    m = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
-                    m.fit(data)
-                    future = m.make_future_dataframe(periods=periods)
-                    forecast = m.predict(future)
-                    return m, forecast
-
-                # Run forecast
-                with st.spinner(f"Generating {forecast_days}-day forecast..."):
-                    try:
-                        m, forecast = get_prophet_forecast(df_prophet, forecast_days)
-                        
-                        st.subheader(f"{forecast_days}-Day Sales Forecast")
-                        fig_forecast = plot_plotly(m, forecast)
-                        fig_forecast.update_layout(
-                            title=f"Daily Sales Forecast",
-                            xaxis_title="Date",
-                            yaxis_title="Forecasted Sales (฿)"
-                        )
-                        st.plotly_chart(fig_forecast, use_container_width=True)
-                        
-                        st.subheader("Forecast Components")
-                        # Prophet's component plot uses matplotlib, so we use st.pyplot
-                        fig_components = m.plot_components(forecast)
-                        st.pyplot(fig_components)
-                    
-                    except Exception as e:
-                        st.error(f"An error occurred during forecasting: {e}")
-                        st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
-        
         # --- Tab 6: Reorder & Stock Check (Conditional) ---
         if stock_file is not None:
             with tabs[5]:
@@ -668,7 +708,7 @@ else:
                     df_merged['deficit'] = df_merged['suggested_stock_level'] - df_merged['Stock']
                     
                     st.subheader("Reorder List")
-                    st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in Tab 4).")
+                    st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in Tab 5).")
                     
                     # Filter for items that need reordering
                     df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
