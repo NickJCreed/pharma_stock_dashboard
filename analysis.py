@@ -306,8 +306,8 @@ st.title("🛒 Sales & Inventory Dashboard")
 # --- Sidebar for File Upload ---
 st.sidebar.header("Upload Your Data")
 uploaded_file = st.sidebar.file_uploader("1. Upload Sales Data (.xlsx)", type=["xlsx"])
+utc_file = st.sidebar.file_uploader("3. Upload UTC Data (.csv)", type=["csv"])
 stock_file = st.sidebar.file_uploader("2. Upload Stock Data (.xlsx)", type=["xlsx"])
-utc_file = st.sidebar.file_uploader("3. Upload UTC Data (.csv)", type=["csv"]) # <-- NEW FILE UPLOADER
 
 # --- Load and Process Data ---
 df_main = None
