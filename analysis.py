@@ -3,8 +3,7 @@ import pandas as pd
 import plotly.express as px
 import io
 from prophet import Prophet
-# ### CHANGED ### - Added 'plot_components_plotly' for interactive charts
-from prophet.plot import plot_plotly, plot_components_plotly 
+from prophet.plot import plot_plotly
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -302,7 +301,6 @@ else:
                 st.markdown("This heatmap shows the number of unique transactions per hour and day of the week.")
                 
                 # Filter for the hours you requested (9am to 8pm -> 9 to 20)
-                # THIS CODE IS ALREADY CORRECT AND FILTERS 9AM-8PM (9 to 20)
                 df_heatmap = df_filtered[
                     (df_filtered['hour_of_day'] >= 9) & (df_filtered['hour_of_day'] <= 20)
                 ]
@@ -567,28 +565,9 @@ else:
                             st.plotly_chart(fig_forecast, use_container_width=True)
                             
                             st.subheader("Forecast Components")
-                            
-                            # --- CHANGED ---
-                            # Replaced st.pyplot with interactive plot_components_plotly
-                            fig_components_plotly = plot_components_plotly(m, forecast)
-
-                            # --- NEW (AND CORRECTED) ---
-                            # Filter the x-axis of the 'daily' seasonality plot (which is in row 3)
-                            # to show only business hours 9 AM to 8 PM (20:00).
-                            # This axis uses a 'timedelta' object, not a simple string.
-                            try:
-                                fig_components_plotly.update_xaxes(
-                                    # We must provide the range as 'timedelta' objects
-                                    range=[pd.to_timedelta('09:00:00'), pd.to_timedelta('20:00:00')],
-                                    row=3,  # The 'daily' plot is the 3rd one
-                                    col=1
-                                )
-                            except Exception as e:
-                                # Failsafe in case the layout is not as expected
-                                st.warning(f"Note: Could not automatically filter the daily chart x-axis. {e}")
-                            
-                            st.plotly_chart(fig_components_plotly, use_container_width=True)
-                            # --- END CHANGE ---
+                            # Prophet's component plot uses matplotlib, so we use st.pyplot
+                            fig_components = m.plot_components(forecast)
+                            st.pyplot(fig_components)
                         
                         except Exception as e:
                             st.error(f"An error occurred during forecasting: {e}")
