@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import io
+import numpy as np
 from prophet import Prophet
 from prophet.plot import plot_plotly
 
@@ -300,6 +301,23 @@ def get_common_co_purchases(df, selected_product, top_n=5):
     
     return top_items
 
+@st.cache_data
+def calculate_future_demand(avg_daily_sales, growth_rate, days):
+    """Calculates total future demand based on a daily growth rate."""
+    if growth_rate == 0:
+        return avg_daily_sales * float(days)
+    
+    total_demand = 0.0
+    # Start with today's demand, and project forward
+    current_demand = float(avg_daily_sales) 
+    
+    for _ in range(int(days)):
+        # Assume growth applies *to* the next day
+        current_demand *= (1.0 + growth_rate)
+        total_demand += current_demand
+        
+    return total_demand
+
 # --- Main App ---
 st.title("🛒 Sales & Inventory Dashboard")
 
@@ -343,16 +361,23 @@ else:
     # --- Sidebar Filters ---
     st.sidebar.header("Filters")
     
-    # Filter by Product
+    # --- [MODIFIED] Inverse Filter by Product ---
     all_products = df['Product Name'].unique()
-    selected_products = st.sidebar.multiselect(
-        "Filter by Product",
+    excluded_products = st.sidebar.multiselect(
+        "Select products to EXCLUDE from dashboard:", # <-- CHANGED
         options=all_products,
-        default=all_products
+        default=[] # <-- CHANGED
     )
     
     # Filter data based on sidebar selection
-    df_filtered = df[df['Product Name'].isin(selected_products)]
+    df_filtered = df[~df['Product Name'].isin(excluded_products)] # <-- CHANGED (added ~)
+    
+    # --- [NEW] Global Stock Configuration (Moved from Tab 5) ---
+    st.sidebar.header("Stock Configuration")
+    lead_time_weeks = st.sidebar.number_input(
+        "Weeks of stock to keep on hand?", 
+        min_value=1, max_value=12, value=3, step=1
+    )
     
     if df_filtered.empty:
         st.warning("No data found for the selected filters.")
@@ -411,9 +436,9 @@ else:
             col3.metric("Total Cost", f"฿{total_cost:,.2f}")
             
             col4, col5, col6 = st.columns(3)
-            col4.metric("Total Transactions", f"{total_tx:,}")
+            col4.metric("Total Transactions", f\"{total_tx:,}\")
             col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col6.metric("Avg. Daily Growth", f"{avg_daily_growth_pct:,.2f}%")
+            col6.metric("Avg. Daily Growth", f\"{avg_daily_growth_pct:,.2f}%\")
             
             st.markdown("---") # Separator
 
@@ -441,6 +466,8 @@ else:
             # Check for sufficient data
             if len(df_prophet) < 5:
                 st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
+                # [NEW] Set default growth rate if forecast can't run
+                st.session_state['prophet_growth_rate'] = 0.0
             else:
                 # Forecasting parameters
                 forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
@@ -459,6 +486,15 @@ else:
                     try:
                         m, forecast = get_prophet_forecast(df_prophet, forecast_days)
                         
+                        # --- [NEW] Extract Prophet growth rate and store in session state ---
+                        prophet_growth_rate = m.params['k'][0][0] # This is the daily growth rate 'k'
+                        st.session_state['prophet_growth_rate'] = prophet_growth_rate
+                        
+                        # Add a metric to display this
+                        st.metric("Prophet-derived Daily Growth Rate (k)", f"{prophet_growth_rate:,.4f}")
+                        st.caption("This daily growth rate is used in the 'Inventory Insights' tab.")
+                        # --- End of new section ---
+                        
                         st.subheader(f"{forecast_days}-Day Sales Forecast")
                         fig_forecast = plot_plotly(m, forecast)
                         fig_forecast.update_layout(
@@ -476,6 +512,7 @@ else:
                     except Exception as e:
                         st.error(f"An error occurred during forecasting: {e}")
                         st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
+                        st.session_state['prophet_growth_rate'] = 0.0 # Default to 0 if forecast fails
 
 
         # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
@@ -596,8 +633,8 @@ else:
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col2.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
-            col3.metric("Total Transactions", f"{total_tx:,}")
+            col2.metric("Avg. Items per Transaction", f\"{items_per_tx:,.2f}\")
+            col3.metric("Total Transactions", f\"{total_tx:,}\")
 
             st.markdown("---")
             
@@ -635,6 +672,12 @@ else:
         # --- Tab 5: Inventory Insights ---
         with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
+            
+            # [NEW] Get prophet growth rate from session state
+            prophet_growth = st.session_state.get('prophet_growth_rate', 0.0)
+            if prophet_growth != 0.0:
+                 st.info(f"Using Prophet daily growth rate of **{prophet_growth:,.4f}** for stock suggestions.")
+            
             st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
             
             # Group by Barcode and Name
@@ -660,9 +703,23 @@ else:
             
             # Add stocking suggestion
             st.subheader("Stocking Suggestions")
-            lead_time_weeks = st.number_input("How many weeks of stock do you want to keep on hand? (Safety Stock)", min_value=1, max_value=12, value=3, step=1)
+            # [MODIFIED] lead_time_weeks is now in the sidebar.
+            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar) and the **global Prophet growth trend**.")
             
-            inventory_stats['suggested_stock_level'] = inventory_stats['avg_weekly_sales'] * lead_time_weeks
+            days_to_cover = lead_time_weeks * 7
+            
+            # --- [MODIFIED] Use new growth-adjusted demand forecast ---
+            inventory_stats['suggested_stock_level'] = inventory_stats.apply(
+                lambda row: calculate_future_demand(
+                    row['avg_daily_sales'],
+                    prophet_growth,
+                    days_to_cover
+                ),
+                axis=1
+            )
+            
+            # --- [NEW] Round up suggested stock ---
+            inventory_stats['suggested_stock_level'] = np.ceil(inventory_stats['suggested_stock_level'])
             
             # Format for display
             inventory_display = inventory_stats.round(2)
@@ -676,7 +733,7 @@ else:
                     "total_quantity_sold": st.column_config.NumberColumn("Total Sold", format="%d units"),
                     "avg_daily_sales": st.column_config.NumberColumn("Avg. Daily Sales"),
                     "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
-                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.1f units"),
+                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.0f units"), # <-- MODIFIED format
                 }
             )
         
@@ -689,46 +746,124 @@ else:
                 df_stock = load_stock_data(stock_file)
                 
                 if df_stock is not None:
-                    # We are using the print statements you added in the prompt
-                    print(df_stock.head()) 
                     
-                    # Merge sales velocity (inventory_stats) with current stock (df_stock)
-                    # We use a 'left' merge to start from what we've sold.
-                    df_merged = pd.merge(
-                        inventory_stats, # From sales data (now includes UTC)
-                        df_stock[['Barcode', 'Stock']], # From stock data
-                        on='Barcode',
-                        how='left' 
-                    )
-                    print(df_merged.head())
+                    # --- [NEW] Filter out UTC items for this tab ONLY ---
+                    # We identify UTC items by their 'Product Barcode' starting with "UTC_"
+                    # We must filter df_filtered *before* grouping.
+                    df_restock_sales_data = df_filtered[
+                        ~df_filtered['Product Barcode'].astype(str).str.startswith('UTC_')
+                    ]
                     
-                    # Calculate the deficit
-                    # Fillna(0) for items sold but not in stock file (i.e., all UTC items)
-                    df_merged['Stock'] = df_merged['Stock'].fillna(0)
-                    df_merged['deficit'] = df_merged['suggested_stock_level'] - df_merged['Stock']
-                    
-                    st.subheader("Reorder List")
-                    st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in Tab 5).")
-                    
-                    # Filter for items that need reordering
-                    df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
-                    
-                    st.dataframe(
-                        df_reorder,
-                        use_container_width=True,
-                        column_config={
-                            "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
-                            "Barcode": st.column_config.TextColumn("Barcode"),
-                            "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                            "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.1f units"),
-                            "deficit": st.column_config.NumberColumn("Need to Order", format="%.1f units"),
-                            "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
-                            "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
-                        }
-                    )
-                    
-                    with st.expander("View Full Stock-Sales Comparison (All Items)"):
-                        st.dataframe(df_merged.sort_values(by='deficit', ascending=False), use_container_width=True)
+                    if df_restock_sales_data.empty:
+                        st.warning("No non-UTC sales data found to calculate restock levels.")
+                        # Stop execution for this tab if no data
+                    else:
+                        # --- [NEW] Recalculate inventory_stats from non-UTC data ---
+                        group_cols = ['Product Name', 'Product Barcode']
+                        inventory_stats_restock = df_restock_sales_data.groupby(group_cols).agg(
+                            total_quantity_sold=('Quantity Sold', 'sum'),
+                        ).reset_index()
+
+                        inventory_stats_restock.rename(columns={'Product Barcode': 'Barcode'}, inplace=True)
+                        inventory_stats_restock['Barcode'] = inventory_stats_restock['Barcode'].astype(str).str.strip()
+
+                        # --- [NEW] Calculate velocity from this new dataframe ---
+                        inventory_stats_restock['avg_daily_sales'] = inventory_stats_restock['total_quantity_sold'] / num_days
+                        inventory_stats_restock['avg_weekly_sales'] = inventory_stats_restock['avg_daily_sales'] * 7
+                        
+                        # --- [NEW] Calculate Prophet-adjusted stock level ---
+                        prophet_growth = st.session_state.get('prophet_growth_rate', 0.0)
+                        days_to_cover = lead_time_weeks * 7
+                        
+                        inventory_stats_restock['suggested_stock_level'] = inventory_stats_restock.apply(
+                            lambda row: calculate_future_demand(
+                                row['avg_daily_sales'],
+                                prophet_growth,
+                                days_to_cover
+                            ),
+                            axis=1
+                        )
+                        # --- [NEW] Round up suggested stock ---
+                        inventory_stats_restock['suggested_stock_level'] = np.ceil(inventory_stats_restock['suggested_stock_level'])
+
+                        # --- [MODIFIED] Merge using the new 'inventory_stats_restock' ---
+                        df_merged = pd.merge(
+                            inventory_stats_restock, # <-- CHANGED
+                            df_stock[['Barcode', 'Stock']], # From stock data
+                            on='Barcode',
+                            how='left' 
+                        )
+                        
+                        # Calculate the deficit
+                        # Fillna(0) for items sold but not in stock file
+                        df_merged['Stock'] = df_merged['Stock'].fillna(0)
+                        df_merged['deficit'] = df_merged['suggested_stock_level'] - df_merged['Stock']
+                        
+                        # --- [NEW] Round up deficit ---
+                        df_merged['deficit'] = np.ceil(df_merged['deficit'])
+                        
+                        st.subheader("Reorder List")
+                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar, and the Prophet growth trend).")
+                        
+                        # Filter for items that need reordering
+                        df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
+                        
+                        # --- [NEW] "Already Ordered" Ticking logic ---
+                        all_reorder_products = df_reorder['Product Name'].unique()
+                        
+                        if 'ordered_list' not in st.session_state:
+                            st.session_state.ordered_list = []
+
+                        # Filter session state to only include items still in the reorder list
+                        st.session_state.ordered_list = [
+                            p for p in st.session_state.ordered_list if p in all_reorder_products
+                        ]
+
+                        ordered_items = st.multiselect(
+                            "Mark items as 'Already Ordered' (to hide from list):",
+                            options=all_reorder_products,
+                            key='ordered_list' # Use session state to remember
+                        )
+                        
+                        # Filter the dataframe to hide the "ticked" items
+                        df_reorder_to_display = df_reorder[
+                            ~df_reorder['Product Name'].isin(ordered_items)
+                        ]
+                        
+                        # --- [MODIFIED] Display the filtered dataframe ---
+                        st.dataframe(
+                            df_reorder_to_display, # <-- CHANGED
+                            use_container_width=True,
+                            column_config={
+                                "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
+                                "Barcode": st.column_config.TextColumn("Barcode"),
+                                "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
+                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"), # <-- MODIFIED format
+                                "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"), # <-- MODIFIED format
+                                "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
+                                "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
+                            }
+                        )
+                        
+                        # --- [NEW] Show a list of items you've marked as ordered ---
+                        if ordered_items:
+                            st.subheader("Already Ordered (Hidden from list above)")
+                            st.dataframe(
+                                df_reorder[df_reorder['Product Name'].isin(ordered_items)],
+                                use_container_width=True,
+                                column_config={
+                                    "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
+                                    "Barcode": st.column_config.TextColumn("Barcode"),
+                                    "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
+                                    "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"),
+                                    "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
+                                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
+                                    "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
+                                }
+                            )
+                        
+                        with st.expander("View Full Stock-Sales Comparison (All Items)"):
+                            st.dataframe(df_merged.sort_values(by='deficit', ascending=False), use_container_width=True)
         
         # Add a warning in the sidebar if stock file is missing
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
