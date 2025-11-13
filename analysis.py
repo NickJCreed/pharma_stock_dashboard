@@ -301,22 +301,28 @@ def get_common_co_purchases(df, selected_product, top_n=5):
     
     return top_items
 
+# --- [FIXED] Rewritten function for linear forecasting ---
 @st.cache_data
-def calculate_future_demand(avg_daily_sales, growth_rate, days):
-    """Calculates total future demand based on a daily growth rate."""
-    if growth_rate == 0:
-        return avg_daily_sales * float(days)
+def calculate_future_demand(avg_daily_sales, growth_k, days):
+    """
+    Calculates total future demand based on a *linear* growth factor (k).
+    Formula: Total = (avg_sales * days) + (k * (days * (days + 1) / 2))
+    """
+    days = float(days)
+    avg_daily_sales = float(avg_daily_sales)
+    growth_k = float(growth_k)
+
+    # 1. Base demand (linear, no growth)
+    base_demand = avg_daily_sales * days
     
-    total_demand = 0.0
-    # Start with today's demand, and project forward
-    current_demand = float(avg_daily_sales) 
+    # 2. Growth demand (sum of arithmetic series: k*1 + k*2 + ... + k*days)
+    # This simplifies to k * (n*(n+1)/2)
+    growth_demand = growth_k * (days * (days + 1) / 2.0)
     
-    for _ in range(int(days)):
-        # Assume growth applies *to* the next day
-        current_demand *= (1.0 + growth_rate)
-        total_demand += current_demand
-        
-    return total_demand
+    total_demand = base_demand + growth_demand
+    
+    # Ensure demand doesn't go below zero if growth is negative
+    return max(0, total_demand)
 
 # --- Main App ---
 st.title("🛒 Sales & Inventory Dashboard")
@@ -436,11 +442,9 @@ else:
             col3.metric("Total Cost", f"฿{total_cost:,.2f}")
             
             col4, col5, col6 = st.columns(3)
-            # --- [FIXED] Removed backslashes ---
             col4.metric("Total Transactions", f"{total_tx:,}")
             col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
             col6.metric("Avg. Daily Growth", f"{avg_daily_growth_pct:,.2f}%")
-            # --- End Fix ---
             
             st.markdown("---") # Separator
 
@@ -463,13 +467,20 @@ else:
             st.subheader("Sales Forecast with Prophet")
             
             # Format for Prophet: needs 'ds' and 'y'
-            df_prophet = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
+            df_prophet_revenue = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
+            
+            # --- [NEW] Create a separate df for *unit* forecasting ---
+            df_daily_units = df_filtered.groupby(df_filtered['datetime'].dt.date) \
+                                      .agg(daily_units=('Quantity Sold', 'sum')) \
+                                      .reset_index()
+            df_prophet_units = df_daily_units.rename(columns={'datetime': 'ds', 'daily_units': 'y'})
+            
             
             # Check for sufficient data
-            if len(df_prophet) < 5:
+            if len(df_prophet_revenue) < 5:
                 st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
-                # [NEW] Set default growth rate if forecast can't run
-                st.session_state['prophet_growth_rate'] = 0.0
+                # Set default growth rate if forecast can't run
+                st.session_state['prophet_unit_growth'] = 0.0
             else:
                 # Forecasting parameters
                 forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
@@ -482,39 +493,49 @@ else:
                     future = m.make_future_dataframe(periods=periods)
                     forecast = m.predict(future)
                     return m, forecast
+                
+                # --- [NEW] Cache a function to get *only* the unit growth factor ---
+                @st.cache_data
+                def get_prophet_unit_growth_k(data):
+                    m = Prophet(growth='linear')
+                    m.fit(data)
+                    # Extract linear growth term 'k'
+                    growth_k = m.params['k'][0][0]
+                    return growth_k
 
                 # Run forecast
                 with st.spinner(f"Generating {forecast_days}-day forecast..."):
                     try:
-                        m, forecast = get_prophet_forecast(df_prophet, forecast_days)
+                        # --- Run the REVENUE forecast for plotting ---
+                        m_revenue, forecast_revenue = get_prophet_forecast(df_prophet_revenue, forecast_days)
                         
-                        # --- [NEW] Extract Prophet growth rate and store in session state ---
-                        prophet_growth_rate = m.params['k'][0][0] # This is the daily growth rate 'k'
-                        st.session_state['prophet_growth_rate'] = prophet_growth_rate
+                        # --- [NEW] Run the UNIT forecast to get the growth factor ---
+                        prophet_unit_growth_k = get_prophet_unit_growth_k(df_prophet_units)
+                        st.session_state['prophet_unit_growth'] = prophet_unit_growth_k
                         
                         # Add a metric to display this
-                        st.metric("Prophet-derived Daily Growth Rate (k)", f"{prophet_growth_rate:,.4f}")
-                        st.caption("This daily growth rate is used in the 'Inventory Insights' tab.")
+                        st.metric("Prophet-derived Daily *Unit* Growth (k)", f"{prophet_unit_growth_k:,.4f} units/day")
+                        st.caption("This linear growth factor is used in the 'Inventory Insights' tab.")
                         # --- End of new section ---
                         
-                        st.subheader(f"{forecast_days}-Day Sales Forecast")
-                        fig_forecast = plot_plotly(m, forecast)
+                        st.subheader(f"{forecast_days}-Day Sales (Revenue) Forecast")
+                        fig_forecast = plot_plotly(m_revenue, forecast_revenue)
                         fig_forecast.update_layout(
-                            title=f"Daily Sales Forecast",
+                            title=f"Daily Sales (Revenue) Forecast",
                             xaxis_title="Date",
                             yaxis_title="Forecasted Sales (฿)"
                         )
                         st.plotly_chart(fig_forecast, use_container_width=True)
                         
-                        st.subheader("Forecast Components")
+                        st.subheader("Revenue Forecast Components")
                         # Prophet's component plot uses matplotlib, so we use st.pyplot
-                        fig_components = m.plot_components(forecast)
+                        fig_components = m_revenue.plot_components(forecast_revenue)
                         st.pyplot(fig_components)
                     
                     except Exception as e:
                         st.error(f"An error occurred during forecasting: {e}")
                         st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
-                        st.session_state['prophet_growth_rate'] = 0.0 # Default to 0 if forecast fails
+                        st.session_state['prophet_unit_growth'] = 0.0 # Default to 0 if forecast fails
 
 
         # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
@@ -593,30 +614,38 @@ else:
 
             # --- KPIs ---
             col1, col2 = st.columns(2)
-            best_product = sorted_products.iloc[0]
-            col1.metric(
-                f"Best Product (by {sort_by})",
-                best_product['Product Name'],
-            )
-            col2.metric(
-                f"Value (by {sort_by})",
-                f"฿{best_product[chart_col]:,.2f}" if chart_col != 'total_quantity_sold' else f"{best_product[chart_col]:,.0f} Units"
-            )
+            if not sorted_products.empty:
+                best_product = sorted_products.iloc[0]
+                col1.metric(
+                    f"Best Product (by {sort_by})",
+                    best_product['Product Name'],
+                )
+                col2.metric(
+                    f"Value (by {sort_by})",
+                    f"฿{best_product[chart_col]:,.2f}" if chart_col != 'total_quantity_sold' else f"{best_product[chart_col]:,.0f} Units"
+                )
+            else:
+                col1.metric(f"Best Product (by {sort_by})", "N/A")
+                col2.metric(f"Value (by {sort_by})", "N/A")
+
 
             # --- Bar Chart of Top 10 ---
             st.subheader("Top 10 Products")
             top_10_products = sorted_products.head(10)
             
-            fig_bar = px.bar(
-                top_10_products,
-                x='Product Name',
-                y=chart_col,
-                title=f"Top 10 Products by {sort_by}",
-                labels={'Product Name': 'Product', chart_col: sort_by},
-                text_auto=True
-            )
-            fig_bar.update_layout(xaxis_title=None)
-            st.plotly_chart(fig_bar, use_container_width=True)
+            if top_10_products.empty:
+                st.warning("No product data to display.")
+            else:
+                fig_bar = px.bar(
+                    top_10_products,
+                    x='Product Name',
+                    y=chart_col,
+                    title=f"Top 10 Products by {sort_by}",
+                    labels={'Product Name': 'Product', chart_col: sort_by},
+                    text_auto=True
+                )
+                fig_bar.update_layout(xaxis_title=None)
+                st.plotly_chart(fig_bar, use_container_width=True)
             
             # --- Full Data Table ---
             with st.expander("View All Product Performance Data"):
@@ -628,17 +657,13 @@ else:
             st.markdown("Understand how customers bundle items in a single transaction.")
             
             # --- 1. Calculate and display KPIs ---
-            # Note: AOV and Total_TX are already calculated on Tab 1, but it's good
-            # to show them here in context as well.
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
             st.subheader("High-Level Metrics")
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            # --- [FIXED] Removed backslashes ---
             col2.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
             col3.metric("Total Transactions", f"{total_tx:,}")
-            # --- End Fix ---
 
             st.markdown("---")
             
@@ -649,38 +674,41 @@ else:
             # Get a list of top 200 products by sales for the dropdown to keep it manageable
             top_product_list = df_filtered['Product Name'].value_counts().head(200).index.tolist()
             
-            selected_product = st.selectbox(
-                "Select a product:",
-                options=top_product_list
-            )
-            
-            if selected_product:
-                # Get the co-purchase data
-                co_purchase_data = get_common_co_purchases(df_filtered, selected_product, top_n=5)
+            if not top_product_list:
+                st.warning("No products available to select.")
+            else:
+                selected_product = st.selectbox(
+                    "Select a product:",
+                    options=top_product_list
+                )
                 
-                if co_purchase_data.empty:
-                    st.info(f"No other products were frequently purchased with '{selected_product}'.")
-                else:
-                    # Create the bar chart
-                    fig_co = px.bar(
-                        co_purchase_data,
-                        x='count',
-                        y='Product Name',
-                        orientation='h',
-                        title=f"Top 5 Products Bought With '{selected_product}'",
-                        labels={'count': 'Number of Transactions', 'Product Name': 'Product'}
-                    )
-                    fig_co.update_layout(yaxis=dict(autorange="reversed")) # Show top item at the top
-                    st.plotly_chart(fig_co, use_container_width=True)
+                if selected_product:
+                    # Get the co-purchase data
+                    co_purchase_data = get_common_co_purchases(df_filtered, selected_product, top_n=5)
+                    
+                    if co_purchase_data.empty:
+                        st.info(f"No other products were frequently purchased with '{selected_product}'.")
+                    else:
+                        # Create the bar chart
+                        fig_co = px.bar(
+                            co_purchase_data,
+                            x='count',
+                            y='Product Name',
+                            orientation='h',
+                            title=f"Top 5 Products Bought With '{selected_product}'",
+                            labels={'count': 'Number of Transactions', 'Product Name': 'Product'}
+                        )
+                        fig_co.update_layout(yaxis=dict(autorange="reversed")) # Show top item at the top
+                        st.plotly_chart(fig_co, use_container_width=True)
 
         # --- Tab 5: Inventory Insights ---
         with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
             
             # [NEW] Get prophet growth rate from session state
-            prophet_growth = st.session_state.get('prophet_growth_rate', 0.0)
-            if prophet_growth != 0.0:
-                 st.info(f"Using Prophet daily growth rate of **{prophet_growth:,.4f}** for stock suggestions.")
+            prophet_unit_growth_k = st.session_state.get('prophet_unit_growth', 0.0)
+            if prophet_unit_growth_k != 0.0:
+                 st.info(f"Using Prophet daily *unit* growth factor of **{prophet_unit_growth_k:,.4f} units/day** for stock suggestions.")
             
             st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
             
@@ -698,9 +726,6 @@ else:
             # Ensure Barcode is string for merging, even for UTC items
             inventory_stats['Barcode'] = inventory_stats['Barcode'].astype(str).str.strip()
             
-            # --- No need to convert to numeric, as UTC barcodes are strings ---
-            # --- and stock barcodes are cleaned to strings in load_stock_data ---
-
             # Calculate sales velocity
             inventory_stats['avg_daily_sales'] = inventory_stats['total_quantity_sold'] / num_days
             inventory_stats['avg_weekly_sales'] = inventory_stats['avg_daily_sales'] * 7
@@ -708,15 +733,15 @@ else:
             # Add stocking suggestion
             st.subheader("Stocking Suggestions")
             # [MODIFIED] lead_time_weeks is now in the sidebar.
-            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar) and the **global Prophet growth trend**.")
+            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar) and the **global Prophet *unit* growth trend**.")
             
             days_to_cover = lead_time_weeks * 7
             
-            # --- [MODIFIED] Use new growth-adjusted demand forecast ---
+            # --- [MODIFIED] Use new *linear* growth-adjusted demand forecast ---
             inventory_stats['suggested_stock_level'] = inventory_stats.apply(
                 lambda row: calculate_future_demand(
                     row['avg_daily_sales'],
-                    prophet_growth,
+                    prophet_unit_growth_k,
                     days_to_cover
                 ),
                 axis=1
@@ -726,7 +751,7 @@ else:
             inventory_stats['suggested_stock_level'] = np.ceil(inventory_stats['suggested_stock_level'])
             
             # Format for display
-            inventory_display = inventory_stats.round(2)
+            inventory_display = inventory_stats.copy()
             
             st.dataframe(
                 inventory_display.sort_values(by='avg_weekly_sales', ascending=False),
@@ -735,9 +760,9 @@ else:
                     "Product Name": st.column_config.TextColumn("Product Name", width="large"),
                     "Barcode": st.column_config.TextColumn("Barcode"),
                     "total_quantity_sold": st.column_config.NumberColumn("Total Sold", format="%d units"),
-                    "avg_daily_sales": st.column_config.NumberColumn("Avg. Daily Sales"),
-                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
-                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.0f units"), # <-- MODIFIED format
+                    "avg_daily_sales": st.column_config.NumberColumn("Avg. Daily Sales", format="%.2f"),
+                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
+                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.0f units"),
                 }
             )
         
@@ -776,13 +801,13 @@ else:
                         inventory_stats_restock['avg_weekly_sales'] = inventory_stats_restock['avg_daily_sales'] * 7
                         
                         # --- [NEW] Calculate Prophet-adjusted stock level ---
-                        prophet_growth = st.session_state.get('prophet_growth_rate', 0.0)
+                        prophet_unit_growth_k = st.session_state.get('prophet_unit_growth', 0.0)
                         days_to_cover = lead_time_weeks * 7
                         
                         inventory_stats_restock['suggested_stock_level'] = inventory_stats_restock.apply(
                             lambda row: calculate_future_demand(
                                 row['avg_daily_sales'],
-                                prophet_growth,
+                                prophet_unit_growth_k,
                                 days_to_cover
                             ),
                             axis=1
@@ -807,7 +832,7 @@ else:
                         df_merged['deficit'] = np.ceil(df_merged['deficit'])
                         
                         st.subheader("Reorder List")
-                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar, and the Prophet growth trend).")
+                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar, and the Prophet *unit* growth trend).")
                         
                         # Filter for items that need reordering
                         df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
@@ -842,9 +867,9 @@ else:
                                 "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
                                 "Barcode": st.column_config.TextColumn("Barcode"),
                                 "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"), # <-- MODFIED format
-                                "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"), # <-- MODIFIED format
-                                "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
+                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"),
+                                "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
+                                "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
                                 "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
                             }
                         )
@@ -861,12 +886,12 @@ else:
                                     "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
                                     "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"),
                                     "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
-                                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
+                                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
                                     "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
                                 }
                             )
                         
-                        with st.expander("View Full Stock-Sales Comparison (All Items)"):
+                        with st.expander("View Full Stock-Sales Comparison (All Non-UTC Items)"):
                             st.dataframe(df_merged.sort_values(by='deficit', ascending=False), use_container_width=True)
         
         # Add a warning in the sidebar if stock file is missing
