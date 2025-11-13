@@ -301,28 +301,7 @@ def get_common_co_purchases(df, selected_product, top_n=5):
     
     return top_items
 
-# --- [FIXED] Rewritten function for linear forecasting ---
-@st.cache_data
-def calculate_future_demand(avg_daily_sales, growth_k, days):
-    """
-    Calculates total future demand based on a *linear* growth factor (k).
-    Formula: Total = (avg_sales * days) + (k * (days * (days + 1) / 2))
-    """
-    days = float(days)
-    avg_daily_sales = float(avg_daily_sales)
-    growth_k = float(growth_k)
-
-    # 1. Base demand (linear, no growth)
-    base_demand = avg_daily_sales * days
-    
-    # 2. Growth demand (sum of arithmetic series: k*1 + k*2 + ... + k*days)
-    # This simplifies to k * (n*(n+1)/2)
-    growth_demand = growth_k * (days * (days + 1) / 2.0)
-    
-    total_demand = base_demand + growth_demand
-    
-    # Ensure demand doesn't go below zero if growth is negative
-    return max(0, total_demand)
+# --- [REMOVED] Flawed calculate_future_demand function ---
 
 # --- Main App ---
 st.title("🛒 Sales & Inventory Dashboard")
@@ -469,18 +448,11 @@ else:
             # Format for Prophet: needs 'ds' and 'y'
             df_prophet_revenue = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
             
-            # --- [NEW] Create a separate df for *unit* forecasting ---
-            df_daily_units = df_filtered.groupby(df_filtered['datetime'].dt.date) \
-                                      .agg(daily_units=('Quantity Sold', 'sum')) \
-                                      .reset_index()
-            df_prophet_units = df_daily_units.rename(columns={'datetime': 'ds', 'daily_units': 'y'})
-            
+            # --- [REMOVED] logic for df_prophet_units ---
             
             # Check for sufficient data
             if len(df_prophet_revenue) < 5:
                 st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
-                # Set default growth rate if forecast can't run
-                st.session_state['prophet_unit_growth'] = 0.0
             else:
                 # Forecasting parameters
                 forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
@@ -494,14 +466,7 @@ else:
                     forecast = m.predict(future)
                     return m, forecast
                 
-                # --- [NEW] Cache a function to get *only* the unit growth factor ---
-                @st.cache_data
-                def get_prophet_unit_growth_k(data):
-                    m = Prophet(growth='linear')
-                    m.fit(data)
-                    # Extract linear growth term 'k'
-                    growth_k = m.params['k'][0][0]
-                    return growth_k
+                # --- [REMOVED] get_prophet_unit_growth_k function ---
 
                 # Run forecast
                 with st.spinner(f"Generating {forecast_days}-day forecast..."):
@@ -509,14 +474,7 @@ else:
                         # --- Run the REVENUE forecast for plotting ---
                         m_revenue, forecast_revenue = get_prophet_forecast(df_prophet_revenue, forecast_days)
                         
-                        # --- [NEW] Run the UNIT forecast to get the growth factor ---
-                        prophet_unit_growth_k = get_prophet_unit_growth_k(df_prophet_units)
-                        st.session_state['prophet_unit_growth'] = prophet_unit_growth_k
-                        
-                        # Add a metric to display this
-                        st.metric("Prophet-derived Daily *Unit* Growth (k)", f"{prophet_unit_growth_k:,.4f} units/day")
-                        st.caption("This linear growth factor is used in the 'Inventory Insights' tab.")
-                        # --- End of new section ---
+                        # --- [REMOVED] All logic for unit_growth_k ---
                         
                         st.subheader(f"{forecast_days}-Day Sales (Revenue) Forecast")
                         fig_forecast = plot_plotly(m_revenue, forecast_revenue)
@@ -535,7 +493,6 @@ else:
                     except Exception as e:
                         st.error(f"An error occurred during forecasting: {e}")
                         st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
-                        st.session_state['prophet_unit_growth'] = 0.0 # Default to 0 if forecast fails
 
 
         # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
@@ -705,10 +662,7 @@ else:
         with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
             
-            # [NEW] Get prophet growth rate from session state
-            prophet_unit_growth_k = st.session_state.get('prophet_unit_growth', 0.0)
-            if prophet_unit_growth_k != 0.0:
-                 st.info(f"Using Prophet daily *unit* growth factor of **{prophet_unit_growth_k:,.4f} units/day** for stock suggestions.")
+            # --- [REMOVED] Prophet info message ---
             
             st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
             
@@ -733,19 +687,11 @@ else:
             # Add stocking suggestion
             st.subheader("Stocking Suggestions")
             # [MODIFIED] lead_time_weeks is now in the sidebar.
-            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar) and the **global Prophet *unit* growth trend**.")
+            # --- [FIXED] Updated helper text ---
+            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar), calculated from your average weekly sales.")
             
-            days_to_cover = lead_time_weeks * 7
-            
-            # --- [MODIFIED] Use new *linear* growth-adjusted demand forecast ---
-            inventory_stats['suggested_stock_level'] = inventory_stats.apply(
-                lambda row: calculate_future_demand(
-                    row['avg_daily_sales'],
-                    prophet_unit_growth_k,
-                    days_to_cover
-                ),
-                axis=1
-            )
+            # --- [FIXED] Reverted to simple linear calculation ---
+            inventory_stats['suggested_stock_level'] = inventory_stats['avg_weekly_sales'] * lead_time_weeks
             
             # --- [NEW] Round up suggested stock ---
             inventory_stats['suggested_stock_level'] = np.ceil(inventory_stats['suggested_stock_level'])
@@ -800,18 +746,9 @@ else:
                         inventory_stats_restock['avg_daily_sales'] = inventory_stats_restock['total_quantity_sold'] / num_days
                         inventory_stats_restock['avg_weekly_sales'] = inventory_stats_restock['avg_daily_sales'] * 7
                         
-                        # --- [NEW] Calculate Prophet-adjusted stock level ---
-                        prophet_unit_growth_k = st.session_state.get('prophet_unit_growth', 0.0)
-                        days_to_cover = lead_time_weeks * 7
+                        # --- [FIXED] Reverted to simple linear calculation ---
+                        inventory_stats_restock['suggested_stock_level'] = inventory_stats_restock['avg_weekly_sales'] * lead_time_weeks
                         
-                        inventory_stats_restock['suggested_stock_level'] = inventory_stats_restock.apply(
-                            lambda row: calculate_future_demand(
-                                row['avg_daily_sales'],
-                                prophet_unit_growth_k,
-                                days_to_cover
-                            ),
-                            axis=1
-                        )
                         # --- [NEW] Round up suggested stock ---
                         inventory_stats_restock['suggested_stock_level'] = np.ceil(inventory_stats_restock['suggested_stock_level'])
 
@@ -832,7 +769,8 @@ else:
                         df_merged['deficit'] = np.ceil(df_merged['deficit'])
                         
                         st.subheader("Reorder List")
-                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar, and the Prophet *unit* growth trend).")
+                        # --- [FIXED] Updated helper text ---
+                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar).")
                         
                         # Filter for items that need reordering
                         df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
