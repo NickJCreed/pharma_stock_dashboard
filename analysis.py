@@ -436,9 +436,11 @@ else:
             col3.metric("Total Cost", f"฿{total_cost:,.2f}")
             
             col4, col5, col6 = st.columns(3)
-            col4.metric("Total Transactions", f\"{total_tx:,}\")
+            # --- [FIXED] Removed backslashes ---
+            col4.metric("Total Transactions", f"{total_tx:,}")
             col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col6.metric("Avg. Daily Growth", f\"{avg_daily_growth_pct:,.2f}%\")
+            col6.metric("Avg. Daily Growth", f"{avg_daily_growth_pct:,.2f}%")
+            # --- End Fix ---
             
             st.markdown("---") # Separator
 
@@ -633,8 +635,10 @@ else:
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col2.metric("Avg. Items per Transaction", f\"{items_per_tx:,.2f}\")
-            col3.metric("Total Transactions", f\"{total_tx:,}\")
+            # --- [FIXED] Removed backslashes ---
+            col2.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
+            col3.metric("Total Transactions", f"{total_tx:,}")
+            # --- End Fix ---
 
             st.markdown("---")
             
@@ -838,7 +842,7 @@ else:
                                 "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
                                 "Barcode": st.column_config.TextColumn("Barcode"),
                                 "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"), # <-- MODIFIED format
+                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"), # <-- MODFIED format
                                 "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"), # <-- MODIFIED format
                                 "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales"),
                                 "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
