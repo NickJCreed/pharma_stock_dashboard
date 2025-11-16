@@ -533,23 +533,40 @@ else:
                         # --- Run the REVENUE forecast for plotting ---
                         m_revenue, forecast_revenue = get_prophet_forecast(df_prophet_revenue, forecast_days)
                         
-                        # --- [NEW] Calculate and store growth factor ---
+                        # --- [FIXED] Calculate and store growth factor ---
                         try:
+                            # 1. Get the last date from our sales data
                             last_actual_date = df_prophet_revenue['ds'].max()
-                            future_date = last_actual_date + pd.Timedelta(days=21)
                             
-                            recent_pred = forecast_revenue.loc[forecast_revenue['ds'] == last_actual_date, 'yhat'].iloc[0]
-                            future_pred = forecast_revenue.loc[forecast_revenue['ds'] == future_date, 'yhat'].iloc[0]
+                            # 2. Convert it to a datetime object (at midnight) to match Prophet's 'ds' column
+                            last_actual_date_dt = pd.to_datetime(last_actual_date)
                             
-                            if recent_pred > 0 and future_pred > 0:
-                                st.session_state.growth_factor = future_pred / recent_pred
+                            # 3. Calculate the future date, 21 days later
+                            future_date_dt = last_actual_date_dt + pd.Timedelta(days=21)
+                            
+                            # 4. Find the 'yhat' (prediction) for the last actual date
+                            recent_pred_series = forecast_revenue.loc[forecast_revenue['ds'] == last_actual_date_dt, 'yhat']
+                            future_pred_series = forecast_revenue.loc[forecast_revenue['ds'] == future_date_dt, 'yhat']
+
+                            if recent_pred_series.empty:
+                                st.warning(f"Could not find recent prediction for date {last_actual_date_dt}. Using default growth.")
+                                st.session_state.growth_factor = 1.0
+                            elif future_pred_series.empty:
+                                st.warning(f"Could not find future prediction for date {future_date_dt}. (Is forecast_days >= 21?). Using default growth.")
+                                st.session_state.growth_factor = 1.0
                             else:
-                                st.session_state.growth_factor = 1.0 # Default
+                                recent_pred = recent_pred_series.values[0]
+                                future_pred = future_pred_series.values[0]
+
+                                if recent_pred > 0 and future_pred > 0:
+                                    st.session_state.growth_factor = future_pred / recent_pred
+                                else:
+                                    st.session_state.growth_factor = 1.0 # Default if predictions are zero
                         except Exception as e:
                             st.warning(f"Could not calculate growth factor: {e}")
                             st.session_state.growth_factor = 1.0 # Default
                         
-                        # --- [END NEW] ---
+                        # --- [END FIXED] ---
 
                         st.subheader(f"{forecast_days}-Day Sales (Revenue) Forecast")
                         fig_forecast = plot_plotly(m_revenue, forecast_revenue)
