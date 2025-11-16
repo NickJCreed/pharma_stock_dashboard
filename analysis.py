@@ -395,26 +395,21 @@ else:
             total_profit = df_filtered['Total Profit'].sum()
             total_cost = df_filtered['Total Cost'].sum()
 
-            # 2. Calculate daily stats for growth %
+            # 2. Calculate daily stats (for trend plot and prophet)
             df_daily_sales = df_filtered.groupby(df_filtered['datetime'].dt.date) \
                                       .agg(daily_sales=('Total Price After Discount', 'sum')) \
                                       .reset_index()
             df_daily_sales = df_daily_sales.rename(columns={'datetime': 'date'})
             
-            avg_daily_growth_pct = 0.0
-            if len(df_daily_sales) > 1:
-                df_daily_sales.sort_values(by='date', inplace=True)
-                # Calculate percentage change from the previous day
-                daily_growth = df_daily_sales['daily_sales'].pct_change()
-                # Get the average of these changes
-                avg_daily_growth_pct = daily_growth.mean() * 100 # as a percentage
-                if pd.isna(avg_daily_growth_pct):
-                    avg_daily_growth_pct = 0.0
-            
             # 3. Get transaction KPIs
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
 
-            # 4. Display KPIs in columns
+            # 4. Calculate remaining KPIs
+            avg_daily_sales = total_revenue / num_days if num_days > 0 else 0
+            profit_margin_pct = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
+            markup_pct = (total_profit / total_cost) * 100 if total_cost > 0 else 0
+
+            # 5. Display KPIs in columns
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
             col2.metric("Total Profit", f"฿{total_profit:,.2f}")
@@ -423,7 +418,12 @@ else:
             col4, col5, col6 = st.columns(3)
             col4.metric("Total Transactions", f"{total_tx:,}")
             col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col6.metric("Avg. Daily Growth", f"{avg_daily_growth_pct:,.2f}%")
+            col6.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
+            
+            col7, col8, col9 = st.columns(3)
+            col7.metric("Average Daily Sales", f"฿{avg_daily_sales:,.2f}")
+            col8.metric("Profit Margin", f"{profit_margin_pct:,.2f}%")
+            col9.metric("Markup", f"{markup_pct:,.2f}%")
             
             st.markdown("---") # Separator
 
@@ -441,6 +441,27 @@ else:
             )
             fig_trend.update_layout(xaxis_title="Date", yaxis_title="Total Sales (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
+
+            # --- [NEW] Daily Transactions Bar Chart ---
+            st.subheader("Overall Daily Transactions Trend")
+            
+            # 1. Aggregate transactions (nunique invoices) by date
+            df_daily_transactions = df_filtered.groupby(df_filtered['datetime'].dt.date) \
+                                              .agg(daily_transactions=('Invoice No', 'nunique')) \
+                                              .reset_index()
+            df_daily_transactions = df_daily_transactions.rename(columns={'datetime': 'date'})
+
+            # 2. Plot the bar chart
+            fig_bar_transactions = px.bar(
+                df_daily_transactions,
+                x='date',
+                y='daily_transactions',
+                title="Total Transactions Per Day",
+                labels={'date': 'Date', 'daily_transactions': 'Total Transactions'}
+            )
+            fig_bar_transactions.update_layout(xaxis_title="Date", yaxis_title="Number of Transactions")
+            st.plotly_chart(fig_bar_transactions, use_container_width=True)
+
 
             # --- 2. Prophet Forecasting ---
             st.subheader("Sales Forecast with Prophet")
@@ -835,3 +856,5 @@ else:
         # Add a warning in the sidebar if stock file is missing
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
             st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab.")
+
+}
