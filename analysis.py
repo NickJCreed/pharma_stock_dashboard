@@ -334,6 +334,10 @@ else:
     # --- Combine all loaded dataframes ---
     df = pd.concat(all_dataframes, ignore_index=True)
     
+    # --- [NEW] Initialize session state for growth factor ---
+    if 'growth_factor' not in st.session_state:
+        st.session_state.growth_factor = 1.0 # Default to 1.0 (no change)
+
     # --- Calculate num_days based on the COMBINED dataframe ---
     num_days = df['datetime'].dt.date.nunique()
     if num_days == 0:
@@ -412,7 +416,8 @@ else:
             # 4. Calculate remaining KPIs
             avg_daily_sales = total_revenue / num_days if num_days > 0 else 0
             profit_margin_pct = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
-            markup_pct = (total_profit / total_cost) * 100 if total_cost > 0 else 0
+            # --- [NEW] ---
+            avg_daily_transactions = total_tx / num_days if num_days > 0 else 0
 
             # 5. Display KPIs in columns
             col1, col2, col3 = st.columns(3)
@@ -428,7 +433,8 @@ else:
             col7, col8, col9 = st.columns(3)
             col7.metric("Average Daily Sales", f"฿{avg_daily_sales:,.2f}")
             col8.metric("Profit Margin", f"{profit_margin_pct:,.2f}%")
-            col9.metric("Markup", f"{markup_pct:,.2f}%")
+            # --- [MODIFIED] ---
+            col9.metric("Avg. Daily Transactions", f"{avg_daily_transactions:,.2f}")
             
             st.markdown("---") # Separator
 
@@ -467,6 +473,9 @@ else:
             fig_trend.update_layout(xaxis_title="Date", yaxis_title="Amount (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
             # --- [END MODIFIED] ---
+
+            # --- [NEW] Daily Transactions Bar Chart ---
+            st.subheader("Overall Daily Transactions Trend")
             
             # 1. Aggregate transactions (nunique invoices) by date
             df_daily_transactions = df_filtered.groupby(df_filtered['datetime'].dt.date) \
@@ -496,14 +505,18 @@ else:
             )
             # --- [END MODIFIED] ---
             
-            # --- [REMOVED] logic for df_prophet_units ---
-            
             # Check for sufficient data
             if len(df_prophet_revenue) < 5:
                 st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
             else:
                 # Forecasting parameters
-                forecast_days = st.slider("Days to forecast into the future", 7, 365, 30, key="forecast_days_slider")
+                # --- [MODIFIED] ---
+                forecast_days = st.slider(
+                    "Days to forecast into the future", 
+                    21, 365, 30, # <-- Min value set to 21
+                    key="forecast_days_slider",
+                    help="Must be at least 21 days to calculate the 3-week growth factor."
+                )
                 
                 # Cache the forecast function
                 @st.cache_data
@@ -513,8 +526,6 @@ else:
                     future = m.make_future_dataframe(periods=periods)
                     forecast = m.predict(future)
                     return m, forecast
-                
-                # --- [REMOVED] get_prophet_unit_growth_k function ---
 
                 # Run forecast
                 with st.spinner(f"Generating {forecast_days}-day forecast..."):
@@ -522,8 +533,24 @@ else:
                         # --- Run the REVENUE forecast for plotting ---
                         m_revenue, forecast_revenue = get_prophet_forecast(df_prophet_revenue, forecast_days)
                         
-                        # --- [REMOVED] All logic for unit_growth_k ---
+                        # --- [NEW] Calculate and store growth factor ---
+                        try:
+                            last_actual_date = df_prophet_revenue['ds'].max()
+                            future_date = last_actual_date + pd.Timedelta(days=21)
+                            
+                            recent_pred = forecast_revenue.loc[forecast_revenue['ds'] == last_actual_date, 'yhat'].iloc[0]
+                            future_pred = forecast_revenue.loc[forecast_revenue['ds'] == future_date, 'yhat'].iloc[0]
+                            
+                            if recent_pred > 0 and future_pred > 0:
+                                st.session_state.growth_factor = future_pred / recent_pred
+                            else:
+                                st.session_state.growth_factor = 1.0 # Default
+                        except Exception as e:
+                            st.warning(f"Could not calculate growth factor: {e}")
+                            st.session_state.growth_factor = 1.0 # Default
                         
+                        # --- [END NEW] ---
+
                         st.subheader(f"{forecast_days}-Day Sales (Revenue) Forecast")
                         fig_forecast = plot_plotly(m_revenue, forecast_revenue)
                         fig_forecast.update_layout(
@@ -542,22 +569,26 @@ else:
                         st.error(f"An error occurred during forecasting: {e}")
                         st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
 
+                # --- [NEW] Display the calculated growth factor ---
+                st.subheader("Forecasted Growth Factor")
+                st.metric("Predicted 3-Week Sales Growth (from trend)", f"{st.session_state.growth_factor:.2%}")
+                st.caption("This factor is applied to all stock suggestions in Tabs 5 & 6. It's calculated by comparing the forecasted trend 21 days from your last sale vs. the trend on your last sale day.")
 
         # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
         with tabs[1]:
             st.header("Busiest Times Heatmap")
-            st.markdown("This heatmap shows the number of unique transactions per hour and day of the week.")
+            st.markdown("This heatmap shows the number of unique transactions per hour and day of the week (9am-8pm).")
             
             # Filter for the hours you requested (9am to 8pm -> 9 to 20)
-            df_heatmap = df_filtered[
+            df_heatmap_base = df_filtered[
                 (df_filtered['hour_of_day'] >= 9) & (df_filtered['hour_of_day'] <= 20)
             ]
 
-            if df_heatmap.empty:
+            if df_heatmap_base.empty:
                 st.warning("No sales data found between 9 AM and 8 PM.")
             else:
                 # Group by day and hour, counting unique invoices
-                heatmap_data = df_heatmap.groupby(['day_of_week', 'hour_of_day'])['Invoice No'].nunique().reset_index()
+                heatmap_data = df_heatmap_base.groupby(['day_of_week', 'hour_of_day'])['Invoice No'].nunique().reset_index()
                 
                 # Pivot the data for the heatmap
                 heatmap_pivot = heatmap_data.pivot(
@@ -588,6 +619,49 @@ else:
                     xaxis_title="Hour of Day (24h format)"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # --- [NEW] Daily Summary Statistics Table ---
+                st.markdown("---")
+                st.subheader("Daily Summary Statistics (9am-8pm)")
+                
+                try:
+                    # 1. Aggregate daily stats (revenue and transactions)
+                    daily_agg = df_heatmap_base.groupby(df_heatmap_base['datetime'].dt.date).agg(
+                        daily_revenue=('Total Price After Discount', 'sum'),
+                        daily_transactions=('Invoice No', 'nunique')
+                    )
+                    daily_agg['day_of_week'] = pd.to_datetime(daily_agg.index).day_name()
+                    
+                    # 2. Calculate averages per day of week
+                    day_summary = daily_agg.groupby('day_of_week').agg(
+                        avg_revenue=('daily_revenue', 'mean'),
+                        avg_transactions=('daily_transactions', 'mean')
+                    )
+                    
+                    # 3. Find busiest and quietest hours from the heatmap pivot table
+                    busiest_hours = heatmap_pivot.idxmax(axis=1)
+                    quietest_hours = heatmap_pivot.idxmin(axis=1)
+                    
+                    # 4. Combine the stats
+                    day_summary = day_summary.join(busiest_hours.rename('Busiest Hour (Transactions)'))
+                    day_summary = day_summary.join(quietest_hours.rename('Quietest Hour (Transactions)'))
+                    
+                    # 5. Ensure correct order and all days are present
+                    day_summary = day_summary.reindex(day_order)
+                    
+                    # 6. Display the table
+                    st.dataframe(
+                        day_summary,
+                        use_container_width=True,
+                        column_config={
+                            "avg_revenue": st.column_config.NumberColumn("Avg. Revenue", format="฿%.2f"),
+                            "avg_transactions": st.column_config.NumberColumn("Avg. Transactions", format="%.1f"),
+                            "Busiest Hour (Transactions)": st.column_config.TextColumn("Busiest Hour"),
+                            "Quietest Hour (Transactions)": st.column_config.TextColumn("Quietest Hour"),
+                        }
+                    )
+                except Exception as e:
+                    st.warning(f"Could not generate daily summary table: {e}")
 
         # --- Tab 3: Product Performance ---
         with tabs[2]:
@@ -710,7 +784,8 @@ else:
         with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
             
-            # --- [REMOVED] Prophet info message ---
+            # --- [NEW] Get growth factor from session state ---
+            growth_factor = st.session_state.growth_factor
             
             st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
             
@@ -734,12 +809,13 @@ else:
             
             # Add stocking suggestion
             st.subheader("Stocking Suggestions")
-            # [MODIFIED] lead_time_weeks is now in the sidebar.
-            # --- [FIXED] Updated helper text ---
-            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar), calculated from your average weekly sales.")
             
-            # --- [FIXED] Reverted to simple linear calculation ---
-            inventory_stats['suggested_stock_level'] = inventory_stats['avg_weekly_sales'] * lead_time_weeks
+            # --- [MODIFIED] Updated helper text ---
+            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar).")
+            st.markdown(f"It has also been adjusted by a **{growth_factor:.2%}** growth factor based on the sales forecast in Tab 1.")
+            
+            # --- [MODIFIED] Apply growth factor to calculation ---
+            inventory_stats['suggested_stock_level'] = (inventory_stats['avg_weekly_sales'] * lead_time_weeks) * growth_factor
             
             # --- [NEW] Round up suggested stock ---
             inventory_stats['suggested_stock_level'] = np.ceil(inventory_stats['suggested_stock_level'])
@@ -756,7 +832,8 @@ else:
                     "total_quantity_sold": st.column_config.NumberColumn("Total Sold", format="%d units"),
                     "avg_daily_sales": st.column_config.NumberColumn("Avg. Daily Sales", format="%.2f"),
                     "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
-                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.0f units"),
+                    # --- [MODIFIED] ---
+                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock (Adj.)", format="%.0f units"),
                 }
             )
         
@@ -764,6 +841,9 @@ else:
         if stock_file is not None:
             with tabs[5]:
                 st.header("Stock vs. Forecasted Demand")
+                
+                # --- [NEW] Get growth factor from session state ---
+                growth_factor = st.session_state.growth_factor
                 
                 # Load stock data
                 df_stock = load_stock_data(stock_file)
@@ -794,8 +874,8 @@ else:
                         inventory_stats_restock['avg_daily_sales'] = inventory_stats_restock['total_quantity_sold'] / num_days
                         inventory_stats_restock['avg_weekly_sales'] = inventory_stats_restock['avg_daily_sales'] * 7
                         
-                        # --- [FIXED] Reverted to simple linear calculation ---
-                        inventory_stats_restock['suggested_stock_level'] = inventory_stats_restock['avg_weekly_sales'] * lead_time_weeks
+                        # --- [MODIFIED] Apply growth factor ---
+                        inventory_stats_restock['suggested_stock_level'] = (inventory_stats_restock['avg_weekly_sales'] * lead_time_weeks) * growth_factor
                         
                         # --- [NEW] Round up suggested stock ---
                         inventory_stats_restock['suggested_stock_level'] = np.ceil(inventory_stats_restock['suggested_stock_level'])
@@ -817,8 +897,9 @@ else:
                         df_merged['deficit'] = np.ceil(df_merged['deficit'])
                         
                         st.subheader("Reorder List")
-                        # --- [FIXED] Updated helper text ---
-                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`. (Suggested level is based on **{lead_time_weeks} weeks** of safety stock, set in the sidebar).")
+                        # --- [MODIFIED] Updated helper text ---
+                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`.")
+                        st.markdown(f"(Suggested level is based on **{lead_time_weeks} weeks** of safety stock, adjusted by the **{growth_factor:.2%}** forecast growth factor from Tab 1).")
                         
                         # Filter for items that need reordering
                         df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
@@ -853,7 +934,8 @@ else:
                                 "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
                                 "Barcode": st.column_config.TextColumn("Barcode"),
                                 "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"),
+                                # --- [MODIFIED] ---
+                                "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock (Adj.)", format="%.0f units"),
                                 "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
                                 "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
                                 "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
@@ -870,7 +952,8 @@ else:
                                     "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
                                     "Barcode": st.column_config.TextColumn("Barcode"),
                                     "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                    "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock", format="%.0f units"),
+                                    # --- [MODIFIED] ---
+                                    "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock (Adj.)", format="%.0f units"),
                                     "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
                                     "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
                                     "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
@@ -883,5 +966,3 @@ else:
         # Add a warning in the sidebar if stock file is missing
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
             st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab.")
-
-# --- [FIXED] Removed the extra '}' ---
