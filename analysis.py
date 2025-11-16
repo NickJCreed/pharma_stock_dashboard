@@ -396,10 +396,15 @@ else:
             total_cost = df_filtered['Total Cost'].sum()
 
             # 2. Calculate daily stats (for trend plot and prophet)
-            df_daily_sales = df_filtered.groupby(df_filtered['datetime'].dt.date) \
-                                      .agg(daily_sales=('Total Price After Discount', 'sum')) \
+            # --- [MODIFIED] ---
+            df_daily_stats = df_filtered.groupby(df_filtered['datetime'].dt.date) \
+                                      .agg(
+                                          daily_sales=('Total Price After Discount', 'sum'),
+                                          daily_profit=('Total Profit', 'sum') # <-- ADDED
+                                      ) \
                                       .reset_index()
-            df_daily_sales = df_daily_sales.rename(columns={'datetime': 'date'})
+            df_daily_stats = df_daily_stats.rename(columns={'datetime': 'date'})
+            # --- [END MODIFIED] ---
             
             # 3. Get transaction KPIs
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
@@ -428,19 +433,40 @@ else:
             st.markdown("---") # Separator
 
             # --- 1. Prepare data for Trend Plot ---
-            st.subheader("Overall Daily Sales Trend")
-            # The df_daily_sales calculation is already done above for the KPIs
+            # --- [MODIFIED] ---
+            st.subheader("Overall Daily Sales & Profit Trend")
+            # The df_daily_stats calculation is already done above for the KPIs
+
+            # Melt the dataframe for plotting
+            df_melted = df_daily_stats.melt(
+                id_vars=['date'], 
+                value_vars=['daily_sales', 'daily_profit'], 
+                var_name='Metric', 
+                value_name='Amount (฿)'
+            )
+            
+            # Rename for a cleaner legend
+            df_melted['Metric'] = df_melted['Metric'].map({
+                'daily_sales': 'Total Sales',
+                'daily_profit': 'Total Profit'
+            })
 
             # Plot overall trend
             fig_trend = px.line(
-                df_daily_sales,
+                df_melted,
                 x='date',
-                y='daily_sales',
-                title="Total Daily Sales Over Time",
-                labels={'date': 'Date', 'daily_sales': 'Total Sales (฿)'}
+                y='Amount (฿)',
+                color='Metric', # <-- Use color to differentiate
+                title="Total Daily Sales & Profit Over Time",
+                labels={'date': 'Date', 'Amount (฿)': 'Amount (฿)'},
+                color_discrete_map={ # <-- Assign colors as requested
+                    'Total Sales': 'blue', # (Default, but good to be explicit)
+                    'Total Profit': 'green' # <-- User requested green
+                }
             )
-            fig_trend.update_layout(xaxis_title="Date", yaxis_title="Total Sales (฿)")
+            fig_trend.update_layout(xaxis_title="Date", yaxis_title="Amount (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
+            # --- [END MODIFIED] ---
 
             # --- [NEW] Daily Transactions Bar Chart ---
             st.subheader("Overall Daily Transactions Trend")
@@ -467,7 +493,11 @@ else:
             st.subheader("Sales Forecast with Prophet")
             
             # Format for Prophet: needs 'ds' and 'y'
-            df_prophet_revenue = df_daily_sales.rename(columns={'date': 'ds', 'daily_sales': 'y'})
+            # --- [MODIFIED] ---
+            df_prophet_revenue = df_daily_stats[['date', 'daily_sales']].rename(
+                columns={'date': 'ds', 'daily_sales': 'y'}
+            )
+            # --- [END MODIFIED] ---
             
             # --- [REMOVED] logic for df_prophet_units ---
             
@@ -857,4 +887,4 @@ else:
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
             st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab.")
 
-}
+# --- [FIXED] Removed the extra '}' ---
