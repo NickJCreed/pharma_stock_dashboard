@@ -467,9 +467,6 @@ else:
             fig_trend.update_layout(xaxis_title="Date", yaxis_title="Amount (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
             # --- [END MODIFIED] ---
-
-            # --- [NEW] Daily Transactions Bar Chart ---
-            st.subheader("Overall Daily Transactions Trend")
             
             # 1. Aggregate transactions (nunique invoices) by date
             df_daily_transactions = df_filtered.groupby(df_filtered['datetime'].dt.date) \
