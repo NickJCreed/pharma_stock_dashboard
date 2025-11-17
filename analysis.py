@@ -236,25 +236,30 @@ def load_stock_data(stock_file):
         df.columns = STOCK_COLUMN_NAMES
         
         # --- Final check ---
-        if 'Barcode' not in df.columns or 'Stock' not in df.columns or 'Product Name' not in df.columns:
-            st.error("Stock file is missing 'Barcode', 'Stock', or 'Product Name' after renaming. Please check the column order.")
+        if 'Barcode' not in df.columns or 'Stock' not in df.columns or 'Product Name' not in df.columns or 'Average Cost' not in df.columns:
+            st.error("Stock file is missing 'Barcode', 'Stock', 'Product Name', or 'Average Cost' after renaming. Please check the column order.")
             return None
         
-        # --- Select and clean required columns ---
-        df_stock = df[['Barcode', 'Stock', 'Product Name']].copy()
+        # --- [MODIFIED] Select and clean required columns ---
+        df_stock = df[['Barcode', 'Stock', 'Product Name', 'Average Cost']].copy()
         df_stock['Stock'] = pd.to_numeric(df_stock['Stock'], errors='coerce')
+        df_stock['Average Cost'] = pd.to_numeric(df_stock['Average Cost'], errors='coerce')
 
         # --- FIX: Convert Barcode from float to int to string ---
         df_stock['Barcode'] = df_stock['Barcode'].astype(str).str.strip()
         df_stock['Barcode'] = pd.to_numeric(df_stock['Barcode'], errors='coerce')
-        df_stock.dropna(subset=['Stock', 'Barcode'], inplace=True)
+        df_stock.dropna(subset=['Stock', 'Barcode', 'Average Cost'], inplace=True)
         df_stock['Barcode'] = df_stock['Barcode'].astype('Int64').astype(str)
         
         # In case a barcode is listed multiple times, sum its stock
         df_stock_agg = df_stock.groupby('Barcode').agg(
             Stock=('Stock', 'sum'),
-            product_name=('Product Name', 'first') # Get the first name associated
+            product_name=('Product Name', 'first'), # Get the first name associated
+            Average_Cost=('Average Cost', 'mean') # Get the average cost
         ).reset_index()
+        
+        # --- [NEW] Calculate the total value of each item line ---
+        df_stock_agg['total_value'] = df_stock_agg['Stock'] * df_stock_agg['Average_Cost']
         
         return df_stock_agg
 
@@ -327,6 +332,11 @@ if utc_file is not None:
     if df_utc is not None:
         all_dataframes.append(df_utc)
 
+# --- [MODIFIED] Load stock data early for KPI calculation ---
+df_stock = None
+if stock_file is not None:
+    df_stock = load_stock_data(stock_file) 
+
 
 if not all_dataframes:
     st.info("Please upload your sales data file (and optionally UTC data) using the sidebar to get started.")
@@ -394,21 +404,19 @@ else:
             st.subheader("Period-Wide KPIs")
             st.markdown("These metrics reflect the *entire filtered dataset*.")
             
-            # 1. Calculate main totals
+            # 1. Calculate main totals from SALES data
             total_revenue = df_filtered['Total Price After Discount'].sum()
             total_profit = df_filtered['Total Profit'].sum()
-            total_cost = df_filtered['Total Cost'].sum()
+            total_cost_of_goods_sold = df_filtered['Total Cost'].sum() # This IS COGS
 
             # 2. Calculate daily stats (for trend plot and prophet)
-            # --- [MODIFIED] ---
             df_daily_stats = df_filtered.groupby(df_filtered['datetime'].dt.date) \
                                       .agg(
                                           daily_sales=('Total Price After Discount', 'sum'),
-                                          daily_profit=('Total Profit', 'sum') # <-- ADDED
+                                          daily_profit=('Total Profit', 'sum') 
                                       ) \
                                       .reset_index()
             df_daily_stats = df_daily_stats.rename(columns={'datetime': 'date'})
-            # --- [END MODIFIED] ---
             
             # 3. Get transaction KPIs
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
@@ -416,14 +424,32 @@ else:
             # 4. Calculate remaining KPIs
             avg_daily_sales = total_revenue / num_days if num_days > 0 else 0
             profit_margin_pct = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
-            # --- [NEW] ---
             avg_daily_transactions = total_tx / num_days if num_days > 0 else 0
 
+            # --- [NEW] Calculate Total Inventory Value if stock file is present ---
+            total_inventory_value = 0
+            if df_stock is not None:
+                if 'total_value' in df_stock.columns:
+                    total_inventory_value = df_stock['total_value'].sum()
+                else:
+                    st.warning("Could not calculate Inventory Value. 'total_value' column missing from stock data.")
+
             # 5. Display KPIs in columns
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
-            col2.metric("Total Profit", f"฿{total_profit:,.2f}")
-            col3.metric("Total Cost", f"฿{total_cost:,.2f}")
+            
+            # --- [MODIFIED] KPI Layout ---
+            if df_stock is not None:
+                # 4-column layout if we have inventory value
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
+                col2.metric("Total Profit", f"฿{total_profit:,.2f}")
+                col3.metric("Cost of Goods Sold (COGS)", f"฿{total_cost_of_goods_sold:,.2f}")
+                col4.metric("Total Inventory Value", f"฿{total_inventory_value:,.2f}")
+            else:
+                # 3-column layout if no stock file
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
+                col2.metric("Total Profit", f"฿{total_profit:,.2f}")
+                col3.metric("Cost of Goods Sold (COGS)", f"฿{total_cost_of_goods_sold:,.2f}")
             
             col4, col5, col6 = st.columns(3)
             col4.metric("Total Transactions", f"{total_tx:,}")
@@ -433,15 +459,12 @@ else:
             col7, col8, col9 = st.columns(3)
             col7.metric("Average Daily Sales", f"฿{avg_daily_sales:,.2f}")
             col8.metric("Profit Margin", f"{profit_margin_pct:,.2f}%")
-            # --- [MODIFIED] ---
             col9.metric("Avg. Daily Transactions", f"{avg_daily_transactions:,.2f}")
             
             st.markdown("---") # Separator
 
             # --- 1. Prepare data for Trend Plot ---
-            # --- [MODIFIED] ---
             st.subheader("Overall Daily Sales & Profit Trend")
-            # The df_daily_stats calculation is already done above for the KPIs
 
             # Melt the dataframe for plotting
             df_melted = df_daily_stats.melt(
@@ -462,17 +485,16 @@ else:
                 df_melted,
                 x='date',
                 y='Amount (฿)',
-                color='Metric', # <-- Use color to differentiate
+                color='Metric', 
                 title="Total Daily Sales & Profit Over Time",
                 labels={'date': 'Date', 'Amount (฿)': 'Amount (฿)'},
-                color_discrete_map={ # <-- Assign colors as requested
-                    'Total Sales': 'blue', # (Default, but good to be explicit)
-                    'Total Profit': 'green' # <-- User requested green
+                color_discrete_map={ 
+                    'Total Sales': 'blue', 
+                    'Total Profit': 'green'
                 }
             )
             fig_trend.update_layout(xaxis_title="Date", yaxis_title="Amount (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
-            # --- [END MODIFIED] ---
             
             # 1. Aggregate transactions (nunique invoices) by date
             df_daily_transactions = df_filtered.groupby(df_filtered['datetime'].dt.date) \
@@ -496,18 +518,15 @@ else:
             st.subheader("Sales Forecast with Prophet")
             
             # Format for Prophet: needs 'ds' and 'y'
-            # --- [MODIFIED] ---
             df_prophet_revenue = df_daily_stats[['date', 'daily_sales']].rename(
                 columns={'date': 'ds', 'daily_sales': 'y'}
             )
-            # --- [END MODIFIED] ---
             
             # Check for sufficient data
             if len(df_prophet_revenue) < 5:
                 st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
             else:
                 # Forecasting parameters
-                # --- [MODIFIED] ---
                 forecast_days = st.slider(
                     "Days to forecast into the future", 
                     21, 365, 30, # <-- Min value set to 21
@@ -860,7 +879,7 @@ else:
                 growth_factor = st.session_state.growth_factor
                 
                 # Load stock data
-                df_stock = load_stock_data(stock_file)
+                # df_stock is already loaded from the top
                 
                 if df_stock is not None:
                     
@@ -895,6 +914,7 @@ else:
                         inventory_stats_restock['suggested_stock_level'] = np.ceil(inventory_stats_restock['suggested_stock_level'])
 
                         # --- [MODIFIED] Merge using the new 'inventory_stats_restock' ---
+                        # We only need 'Barcode' and 'Stock' from the full df_stock
                         df_merged = pd.merge(
                             inventory_stats_restock, # <-- CHANGED
                             df_stock[['Barcode', 'Stock']], # From stock data
@@ -979,4 +999,6 @@ else:
         
         # Add a warning in the sidebar if stock file is missing
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
-            st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab.")
+            st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab and 'Total Inventory Value' KPI.")
+
+}
