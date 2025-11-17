@@ -1001,4 +1001,3 @@ else:
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
             st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab and 'Total Inventory Value' KPI.")
 
-}
