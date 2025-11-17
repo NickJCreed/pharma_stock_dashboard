@@ -427,6 +427,8 @@ else:
             avg_daily_transactions = total_tx / num_days if num_days > 0 else 0
 
             # --- [NEW] Calculate Total Inventory Value if stock file is present ---
+
+            
             total_inventory_value = 0
             if df_stock is not None:
                 if 'total_value' in df_stock.columns:
@@ -436,25 +438,23 @@ else:
 
             # 5. Display KPIs in columns
             
-            # --- [MODIFIED] KPI Layout ---
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
+            col2.metric("Total Profit", f"฿{total_profit:,.2f}")
+            col3.metric("Cost of Goods Sold (COGS)", f"฿{total_cost_of_goods_sold:,.2f}")
+
             if df_stock is not None:
-                # 4-column layout if we have inventory value
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
-                col2.metric("Total Profit", f"฿{total_profit:,.2f}")
-                col3.metric("Cost of Goods Sold (COGS)", f"฿{total_cost_of_goods_sold:,.2f}")
-                col4.metric("Total Inventory Value", f"฿{total_inventory_value:,.2f}")
+                col4, col5, col6 = st.columns(3)
+                col4.metric("Current Inventory Value", f"฿{total_inventory_value:,.2f}")
+                col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
+                col6.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
+
             else:
-                # 3-column layout if no stock file
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
-                col2.metric("Total Profit", f"฿{total_profit:,.2f}")
-                col3.metric("Cost of Goods Sold (COGS)", f"฿{total_cost_of_goods_sold:,.2f}")
+                col4.metric("Total Transactions", f"{total_tx:,}")
+                col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
+                col6.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
             
-            col4, col5, col6 = st.columns(3)
-            col4.metric("Total Transactions", f"{total_tx:,}")
-            col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
-            col6.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
             
             col7, col8, col9 = st.columns(3)
             col7.metric("Average Daily Sales", f"฿{avg_daily_sales:,.2f}")
