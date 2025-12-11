@@ -5,6 +5,7 @@ import io
 import numpy as np
 from prophet import Prophet
 from prophet.plot import plot_plotly
+import datetime as dt
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -306,7 +307,6 @@ def get_common_co_purchases(df, selected_product, top_n=5):
     
     return top_items
 
-# --- [REMOVED] Flawed calculate_future_demand function ---
 
 # --- Main App ---
 st.title("🛒 Sales & Inventory Dashboard")
@@ -342,34 +342,66 @@ if not all_dataframes:
     st.info("Please upload your sales data file (and optionally UTC data) using the sidebar to get started.")
 else:
     # --- Combine all loaded dataframes ---
-    df = pd.concat(all_dataframes, ignore_index=True)
+    df_full = pd.concat(all_dataframes, ignore_index=True)
     
     # --- [NEW] Initialize session state for growth factor ---
     if 'growth_factor' not in st.session_state:
         st.session_state.growth_factor = 1.0 # Default to 1.0 (no change)
 
-    # --- Calculate num_days based on the COMBINED dataframe ---
+    # -------------------------------------------------------------------------
+    # --- [NEW] Date Range Filter ---
+    # -------------------------------------------------------------------------
+    st.sidebar.header("Date Range")
+    
+    # 1. Determine the full range of data
+    min_date = df_full['datetime'].min().date()
+    max_date = df_full['datetime'].max().date()
+
+    # 2. Create the date input with default range (full range)
+    # The return value is a tuple (start_date, end_date)
+    selected_dates = st.sidebar.date_input(
+        "Filter by Date:",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
+
+    # 3. Handle the selection logic (wait for user to pick both start and end)
+    if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+        start_date, end_date = selected_dates
+    else:
+        # Fallback if only one date picked or error (use full range)
+        start_date, end_date = min_date, max_date
+
+    # 4. Filter the dataframe based on the selected dates
+    # We do this BEFORE any other filtering so 'df' represents the chosen period
+    mask = (df_full['datetime'].dt.date >= start_date) & (df_full['datetime'].dt.date <= end_date)
+    df = df_full.loc[mask].copy()
+
+    # -------------------------------------------------------------------------
+
+    # --- Calculate num_days based on the FILTERED dataframe ---
     num_days = df['datetime'].dt.date.nunique()
     if num_days == 0:
         num_days = 1 # Avoid division by zero
 
     # Add messages to the sidebar to debug the date range
-    st.sidebar.info(f"Combined data range: {df['datetime'].min().date()} to {df['datetime'].max().date()}")
-    st.sidebar.success(f"Calculating velocity based on **{num_days}** unique sales day(s).")
+    st.sidebar.info(f"Showing data from: **{start_date}** to **{end_date}**")
+    st.sidebar.success(f"Calculating velocity based on **{num_days}** unique sales day(s) in this period.")
     
     # --- Sidebar Filters ---
-    st.sidebar.header("Filters")
+    st.sidebar.header("Product Filters")
     
     # --- [MODIFIED] Inverse Filter by Product ---
     all_products = df['Product Name'].unique()
     excluded_products = st.sidebar.multiselect(
-        "Select products to EXCLUDE from dashboard:", # <-- CHANGED
+        "Select products to EXCLUDE from dashboard:", 
         options=all_products,
-        default=[] # <-- CHANGED
+        default=[] 
     )
     
     # Filter data based on sidebar selection
-    df_filtered = df[~df['Product Name'].isin(excluded_products)] # <-- CHANGED (added ~)
+    df_filtered = df[~df['Product Name'].isin(excluded_products)] 
     
     # --- [NEW] Global Stock Configuration (Moved from Tab 5) ---
     st.sidebar.header("Stock Configuration")
@@ -379,12 +411,12 @@ else:
     )
     
     if df_filtered.empty:
-        st.warning("No data found for the selected filters.")
+        st.warning("No data found for the selected date range and filters.")
     else:
         # --- Create Tabs ---
         tab_list = [
-            "📈 Overall Trend & Forecasting",  # <-- MOVED TO FIRST
-            "🔥 Busiest Times Heatmap",      # <-- MOVED TO SECOND
+            "📈 Overall Trend & Forecasting",  
+            "🔥 Busiest Times Heatmap",      
             "🏆 Product Performance", 
             "🛒 Customer Purchase Insights", 
             "📦 Inventory Insights"
@@ -402,7 +434,7 @@ else:
 
             # --- [NEW] Top-Level KPIs ---
             st.subheader("Period-Wide KPIs")
-            st.markdown("These metrics reflect the *entire filtered dataset*.")
+            st.markdown(f"These metrics reflect the *filtered dataset* ({start_date} to {end_date}).")
             
             # 1. Calculate main totals from SALES data
             total_revenue = df_filtered['Total Price After Discount'].sum()
@@ -1000,4 +1032,3 @@ else:
         # Add a warning in the sidebar if stock file is missing
         elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
             st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab and 'Total Inventory Value' KPI.")
-
