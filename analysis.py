@@ -557,8 +557,8 @@ else:
                             # 2. Convert it to a datetime object (at midnight) to match Prophet's 'ds' column
                             last_actual_date_dt = pd.to_datetime(last_actual_date)
                             
-                            # 3. Calculate the future date, 21 days later
-                            future_date_dt = last_actual_date_dt + pd.Timedelta(days=21)
+                            # 3. Calculate the future date, 28 days later
+                            future_date_dt = last_actual_date_dt + pd.Timedelta(days=28)
                             
                             # 4. Find the 'yhat' (prediction) for the last actual date
                             recent_pred_series = forecast_revenue.loc[forecast_revenue['ds'] == last_actual_date_dt, 'yhat']
@@ -604,7 +604,7 @@ else:
 
                 # --- [NEW] Display the calculated growth factor ---
                 st.subheader("Forecasted Growth Factor")
-                st.metric("Predicted 3-Week Sales Growth (from trend)", f"{st.session_state.growth_factor:.2%}")
+                st.metric("Predicted 4-Week Sales Growth (from trend)", f"{st.session_state.growth_factor:.2%}")
                 st.caption("This factor is applied to all stock suggestions in Tabs 5 & 6. It's calculated by comparing the forecasted trend 21 days from your last sale vs. the trend on your last sale day.")
 
         # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
