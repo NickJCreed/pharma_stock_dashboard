@@ -14,6 +14,22 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- Helper Function to Clean Barcodes (Standardization) ---
+def clean_barcode(series):
+    """
+    Forces barcodes to be strings without decimal places.
+    Handles floats (885.0 -> '885') and strings (' 885 ' -> '885').
+    """
+    # 1. Force to numeric, turning errors to NaN
+    s = pd.to_numeric(series, errors='coerce')
+    # 2. Fill NaNs with 0 temporarily to allow integer conversion, then convert to Int64
+    s = s.fillna(0).astype('Int64')
+    # 3. Convert to string
+    s = s.astype(str)
+    # 4. Replace the '0' we added (which represents bad barcodes) with a placeholder or keep as '0'
+    # We will just strip whitespace to be safe
+    return s.str.strip()
+
 # --- Helper Function to Load Main Sales Data ---
 @st.cache_data
 def load_data(uploaded_file):
@@ -37,7 +53,6 @@ def load_data(uploaded_file):
         "Sales Invoice No": "Invoice No",
         "Total Before Discount": "Total Price Before Discount",
         "Total After Discount": "Total Price After Discount"
-        # Any names that already match (e.g., "Product Name") don't need to be here
     }
 
     try:
@@ -47,41 +62,24 @@ def load_data(uploaded_file):
         # 2. Critical Check: Ensure we have AT LEAST the expected columns
         if len(df.columns) < len(SALES_COLUMN_NAMES):
             st.error(f"Error: The uploaded sales file has only {len(df.columns)} columns, but the dashboard expects at least {len(SALES_COLUMN_NAMES)}.")
-            st.error("Please ensure you've uploaded the correct, unmodified sales export.")
             return None
             
-        # 3. Slice the df to only include the columns we want (removes extra blank columns)
+        # 3. Slice the df to only include the columns we want
         df = df.iloc[:, :len(SALES_COLUMN_NAMES)]
-        
-        # 4. Rename columns by their position
         df.columns = SALES_COLUMN_NAMES
-
-        # 5. Rename to match script's internal names
         df.rename(columns=SALES_COLUMNS_RENAME_MAP, inplace=True)
 
-        # --- Critical Data Preprocessing (This part is identical to before) ---
-        
-        # 1. Combine Date and Time and create datetime object
-        if 'Sales Date' not in df.columns or 'Sales Time' not in df.columns:
-            st.error("Error: 'Sales Date' or 'Sales Time' column not found after renaming.")
-            return None
-            
-        # Convert time to string just in case it's read as a time object
+        # --- Date/Time Parsing ---
         df['Sales Time'] = df['Sales Time'].astype(str)
-        
         df['datetime'] = pd.to_datetime(
             df['Sales Date'].astype(str).str.split(' ').str[0] + ' ' + df['Sales Time'], 
             errors='coerce',
         )
-        
-        # 2. Drop rows where date/time conversion failed
         df.dropna(subset=['datetime'], inplace=True)
-        
         if df.empty:
-            st.error("Error: All date parsing failed. Please check your source file's date format.")
+            st.error("Error: All date parsing failed.")
             return None
         
-        # 3. Extract day of week and hour
         df['day_of_week'] = df['datetime'].dt.day_name()
         df['hour_of_day'] = df['datetime'].dt.hour
         
@@ -97,28 +95,29 @@ def load_data(uploaded_file):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        # 5. Handle potential missing invoice numbers for transaction counting
+        # 5. Handle Invoice No
         if 'Invoice No' not in df.columns:
-            st.warning("Warning: 'Invoice No' not found. Using row index for transaction counting.")
             df['Invoice No'] = df.index
         
-        # 6. Create 'Product Barcode' if it's missing (shouldn't be, but good failsafe)
+        # 6. --- FIX: Robust Barcode Cleaning ---
         if 'Product Barcode' not in df.columns:
             df['Product Barcode'] = df['Product Code'].fillna('NO_BARCODE')
+        
+        # Apply the standardized cleaning function to the sales barcodes
+        df['Product Barcode'] = clean_barcode(df['Product Barcode'])
             
         df.dropna(subset=['Total Profit', 'Quantity Sold', 'Invoice No'], inplace=True)
 
-        # 7. Select only the columns needed for the dashboard to ensure clean concatenation
+        # 7. Select required columns
         required_cols = [
             'datetime', 'Product Name', 'Quantity Sold', 'Total Price After Discount',
             'Total Cost', 'Total Profit', 'Product Barcode', 'Invoice No',
             'day_of_week', 'hour_of_day'
         ]
         
-        # Ensure all required columns exist, add placeholders if not
+        # Add placeholders if missing
         for col in required_cols:
             if col not in df.columns:
-                # Add a placeholder, e.g., 0 for numeric, empty string for text
                 if col in ['Quantity Sold', 'Total Price After Discount', 'Total Cost', 'Total Profit']:
                     df[col] = 0
                 else:
@@ -128,23 +127,20 @@ def load_data(uploaded_file):
 
     except Exception as e:
         st.error(f"Error loading sales data: {e}")
-        st.error("Please ensure 'openpyxl' is installed (`pip install openpyxl`) and the file is a valid .xlsx file.")
         return None
 
-# --- [NEW] Helper Function to Load UTC Data ---
+# --- Helper Function to Load UTC Data ---
 @st.cache_data
 def load_utc_data(uploaded_file):
     """Loads and preprocesses the uploaded UTC (CSV) file."""
     try:
         df = pd.read_csv(uploaded_file)
         
-        # 1. Parse Timestamp (Format: 25/10/2025 17:51:53)
         if 'Timestamp' not in df.columns:
             st.error("UTC Data Error: 'Timestamp' column not found.")
             return None
         df['datetime'] = pd.to_datetime(df['Timestamp'], dayfirst=True, errors='coerce')
         
-        # 2. Rename columns to match main data
         UTC_COLUMNS_RENAME_MAP = {
             "Product": "Product Name",
             "Amount Sold": "Quantity Sold",
@@ -154,43 +150,32 @@ def load_utc_data(uploaded_file):
         }
         df.rename(columns=UTC_COLUMNS_RENAME_MAP, inplace=True)
         
-        # 3. Handle missing essential columns
         if 'Product Name' not in df.columns:
             st.error("UTC Data Error: 'Product' column not found.")
             return None
         
-        # Fill 'Amount Gifted' with 0 if it exists, to add to Quantity Sold
         if 'Amount Gifted' in df.columns:
             df['Amount Gifted'] = pd.to_numeric(df['Amount Gifted'], errors='coerce').fillna(0)
             df['Quantity Sold'] = pd.to_numeric(df['Quantity Sold'], errors='coerce').fillna(0)
             df['Quantity Sold'] = df['Quantity Sold'] + df['Amount Gifted']
         
-        
-        # 4. Create placeholder columns needed for the dashboard
-        
-        # Create a unique barcode for each UTC product
+        # Create a unique barcode for UTC items (Prefix with UTC_ so they don't mix with Stock)
         df['Product Barcode'] = "UTC_" + df['Product Name'].str.replace(' ', '_')
         
-        # Create a unique invoice number for each row (since each row is a sale)
         df['Invoice No'] = [f"UTC_INV_{i}" for i in range(len(df))]
-        
-        # 5. Extract day of week and hour
         df.dropna(subset=['datetime'], inplace=True)
         df['day_of_week'] = df['datetime'].dt.day_name()
         df['hour_of_day'] = df['datetime'].dt.hour
         
-        # 6. Convert numeric columns
         numeric_cols = ['Quantity Sold', 'Total Price After Discount', 'Total Cost', 'Total Profit']
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             else:
-                st.warning(f"UTC Data Warning: Missing numeric column '{col}'. Setting to 0.")
-                df[col] = 0 # Add column as 0 if it's missing
+                df[col] = 0
         
         df.dropna(subset=['Total Profit', 'Quantity Sold', 'Invoice No', 'datetime'], inplace=True)
         
-        # 7. Select only the columns needed for concatenation
         required_cols = [
             'datetime', 'Product Name', 'Quantity Sold', 'Total Price After Discount',
             'Total Cost', 'Total Profit', 'Product Barcode', 'Invoice No',
@@ -201,15 +186,12 @@ def load_utc_data(uploaded_file):
 
     except Exception as e:
         st.error(f"Error loading UTC data: {e}")
-        st.error("Please ensure it's a valid .csv file with the correct format.")
         return None
 
-        
 @st.cache_data
 def load_stock_data(stock_file):
     """Loads and processes the uploaded stock XLSX file."""
 
-    # The 32 columns from your stock file, in order.
     STOCK_COLUMN_NAMES = [
         "No.", "Branch Name", "Main Supplier", "Product Code", "Barcode", 
         "Product Name", "Stock", "Average Cost", "Selling Price 1", "Profit", 
@@ -221,90 +203,67 @@ def load_stock_data(stock_file):
     ]
     
     try:
-        # 1. Read the Excel file
         df = pd.read_excel(stock_file, sheet_name=0, header=0)
 
-        # 2. Critical Check: Ensure we have AT LEAST the expected columns
         if len(df.columns) < len(STOCK_COLUMN_NAMES):
-            st.error(f"Error: The uploaded stock file has only {len(df.columns)} columns, but the dashboard expects at least {len(STOCK_COLUMN_NAMES)}.")
-            st.error("Please ensure you've uploaded the correct, unmodified stock export.")
+            st.error(f"Error: The uploaded stock file has only {len(df.columns)} columns.")
             return None
             
-        # 3. Slice the df to only include the columns we want (removes extra blank columns)
         df = df.iloc[:, :len(STOCK_COLUMN_NAMES)]
-        
-        # 4. Rename columns by their position
         df.columns = STOCK_COLUMN_NAMES
         
-        # --- Final check ---
         if 'Barcode' not in df.columns or 'Stock' not in df.columns or 'Product Name' not in df.columns or 'Average Cost' not in df.columns:
-            st.error("Stock file is missing 'Barcode', 'Stock', 'Product Name', or 'Average Cost' after renaming. Please check the column order.")
+            st.error("Stock file is missing required columns.")
             return None
         
-        # --- [MODIFIED] Select and clean required columns ---
         df_stock = df[['Barcode', 'Stock', 'Product Name', 'Average Cost']].copy()
         df_stock['Stock'] = pd.to_numeric(df_stock['Stock'], errors='coerce')
         df_stock['Average Cost'] = pd.to_numeric(df_stock['Average Cost'], errors='coerce')
 
-        # --- FIX: Convert Barcode from float to int to string ---
-        df_stock['Barcode'] = df_stock['Barcode'].astype(str).str.strip()
-        df_stock['Barcode'] = pd.to_numeric(df_stock['Barcode'], errors='coerce')
-        df_stock.dropna(subset=['Stock', 'Barcode', 'Average Cost'], inplace=True)
-        df_stock['Barcode'] = df_stock['Barcode'].astype('Int64').astype(str)
+        # --- FIX: Use exact same cleaning logic as Sales Data ---
+        # This converts "885...0" floats into "885..." strings
+        df_stock['Barcode'] = clean_barcode(df_stock['Barcode'])
         
-        # In case a barcode is listed multiple times, sum its stock
+        # Drop rows where data is bad (excluding stock, as stock can be 0)
+        df_stock.dropna(subset=['Barcode', 'Average Cost'], inplace=True)
+        
+        # Aggregate duplicates (same barcode listed twice)
         df_stock_agg = df_stock.groupby('Barcode').agg(
             Stock=('Stock', 'sum'),
-            product_name=('Product Name', 'first'), # Get the first name associated
-            Average_Cost=('Average Cost', 'mean') # Get the average cost
+            product_name=('Product Name', 'first'),
+            Average_Cost=('Average Cost', 'mean')
         ).reset_index()
         
-        # --- [NEW] Calculate the total value of each item line ---
         df_stock_agg['total_value'] = df_stock_agg['Stock'] * df_stock_agg['Average_Cost']
         
         return df_stock_agg
 
     except Exception as e:
-        st.error(f"Error loading stock data: {e}. Please ensure it's a CSV or TSV file.")
+        st.error(f"Error loading stock data: {e}")
         return None
         
 @st.cache_data
 def get_transaction_kpis(df):
-    """Calculates key transaction KPIs."""
     unique_invoices = df['Invoice No'].nunique()
     if unique_invoices == 0:
         return 0, 0, 0
-    
     total_revenue = df['Total Price After Discount'].sum()
     total_items = df['Quantity Sold'].sum()
-    
     aov = total_revenue / unique_invoices
     items_per_transaction = total_items / unique_invoices
-    
     return aov, items_per_transaction, unique_invoices
 
 @st.cache_data
 def get_common_co_purchases(df, selected_product, top_n=5):
-    """Finds the most commonly co-purchased items."""
-    # 1. Find all invoices containing the selected product
     target_invoices = df[df['Product Name'] == selected_product]['Invoice No'].unique()
-    
     if len(target_invoices) == 0:
-        return pd.DataFrame(columns=['Product Name', 'count']) # Return empty
-    
-    # 2. Get all items from those invoices
+        return pd.DataFrame(columns=['Product Name', 'count'])
     co_purchase_df = df[df['Invoice No'].isin(target_invoices)]
-    
-    # 3. Exclude the selected product itself
     other_items_df = co_purchase_df[co_purchase_df['Product Name'] != selected_product]
-    
     if other_items_df.empty:
-        return pd.DataFrame(columns=['Product Name', 'count']) # Return empty
-    
-    # 4. Count the other items
+        return pd.DataFrame(columns=['Product Name', 'count'])
     top_items = other_items_df['Product Name'].value_counts().head(top_n).reset_index()
     top_items.columns = ['Product Name', 'count']
-    
     return top_items
 
 
@@ -332,7 +291,7 @@ if utc_file is not None:
     if df_utc is not None:
         all_dataframes.append(df_utc)
 
-# --- [MODIFIED] Load stock data early for KPI calculation ---
+# --- Load stock data ---
 df_stock = None
 if stock_file is not None:
     df_stock = load_stock_data(stock_file) 
@@ -344,21 +303,14 @@ else:
     # --- Combine all loaded dataframes ---
     df_full = pd.concat(all_dataframes, ignore_index=True)
     
-    # --- [NEW] Initialize session state for growth factor ---
     if 'growth_factor' not in st.session_state:
-        st.session_state.growth_factor = 1.0 # Default to 1.0 (no change)
+        st.session_state.growth_factor = 1.0
 
-    # -------------------------------------------------------------------------
-    # --- [NEW] Date Range Filter ---
-    # -------------------------------------------------------------------------
+    # --- Date Range Filter ---
     st.sidebar.header("Date Range")
-    
-    # 1. Determine the full range of data
     min_date = df_full['datetime'].min().date()
     max_date = df_full['datetime'].max().date()
 
-    # 2. Create the date input with default range (full range)
-    # The return value is a tuple (start_date, end_date)
     selected_dates = st.sidebar.date_input(
         "Filter by Date:",
         value=(min_date, max_date),
@@ -366,33 +318,24 @@ else:
         max_value=max_date
     )
 
-    # 3. Handle the selection logic (wait for user to pick both start and end)
     if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
         start_date, end_date = selected_dates
     else:
-        # Fallback if only one date picked or error (use full range)
         start_date, end_date = min_date, max_date
 
-    # 4. Filter the dataframe based on the selected dates
-    # We do this BEFORE any other filtering so 'df' represents the chosen period
     mask = (df_full['datetime'].dt.date >= start_date) & (df_full['datetime'].dt.date <= end_date)
     df = df_full.loc[mask].copy()
 
-    # -------------------------------------------------------------------------
-
-    # --- Calculate num_days based on the FILTERED dataframe ---
+    # --- Calculate num_days based on filtered data ---
     num_days = df['datetime'].dt.date.nunique()
     if num_days == 0:
-        num_days = 1 # Avoid division by zero
+        num_days = 1 
 
-    # Add messages to the sidebar to debug the date range
     st.sidebar.info(f"Showing data from: **{start_date}** to **{end_date}**")
-    st.sidebar.success(f"Calculating velocity based on **{num_days}** unique sales day(s) in this period.")
+    st.sidebar.success(f"Calculating velocity based on **{num_days}** unique sales day(s).")
     
     # --- Sidebar Filters ---
     st.sidebar.header("Product Filters")
-    
-    # --- [MODIFIED] Inverse Filter by Product ---
     all_products = df['Product Name'].unique()
     excluded_products = st.sidebar.multiselect(
         "Select products to EXCLUDE from dashboard:", 
@@ -400,10 +343,8 @@ else:
         default=[] 
     )
     
-    # Filter data based on sidebar selection
     df_filtered = df[~df['Product Name'].isin(excluded_products)] 
     
-    # --- [NEW] Global Stock Configuration (Moved from Tab 5) ---
     st.sidebar.header("Stock Configuration")
     lead_time_weeks = st.sidebar.number_input(
         "Weeks of stock to keep on hand?", 
@@ -413,7 +354,6 @@ else:
     if df_filtered.empty:
         st.warning("No data found for the selected date range and filters.")
     else:
-        # --- Create Tabs ---
         tab_list = [
             "📈 Overall Trend & Forecasting",  
             "🔥 Busiest Times Heatmap",      
@@ -422,26 +362,22 @@ else:
             "📦 Inventory Insights"
         ]
         
-        # Dynamically add the new tab if stock file is present
         if stock_file is not None:
             tab_list.append("🛍️ Reorder & Stock Check")
         
         tabs = st.tabs(tab_list)
 
-        # --- Tab 1: Overall Trend & Forecasting (NEW FIRST TAB) ---
+        # --- Tab 1: Overall Trend & Forecasting ---
         with tabs[0]:
             st.header("Overall Sales Trend & Forecasting")
 
-            # --- [NEW] Top-Level KPIs ---
             st.subheader("Period-Wide KPIs")
             st.markdown(f"These metrics reflect the *filtered dataset* ({start_date} to {end_date}).")
             
-            # 1. Calculate main totals from SALES data
             total_revenue = df_filtered['Total Price After Discount'].sum()
             total_profit = df_filtered['Total Profit'].sum()
-            total_cost_of_goods_sold = df_filtered['Total Cost'].sum() # This IS COGS
+            total_cost_of_goods_sold = df_filtered['Total Cost'].sum()
 
-            # 2. Calculate daily stats (for trend plot and prophet)
             df_daily_stats = df_filtered.groupby(df_filtered['datetime'].dt.date) \
                                       .agg(
                                           daily_sales=('Total Price After Discount', 'sum'),
@@ -450,26 +386,18 @@ else:
                                       .reset_index()
             df_daily_stats = df_daily_stats.rename(columns={'datetime': 'date'})
             
-            # 3. Get transaction KPIs
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
 
-            # 4. Calculate remaining KPIs
             avg_daily_sales = total_revenue / num_days if num_days > 0 else 0
             profit_margin_pct = (total_profit / total_revenue) * 100 if total_revenue > 0 else 0
             avg_daily_transactions = total_tx / num_days if num_days > 0 else 0
 
-            # --- [NEW] Calculate Total Inventory Value if stock file is present ---
-
-            
             total_inventory_value = 0
             if df_stock is not None:
                 if 'total_value' in df_stock.columns:
                     total_inventory_value = df_stock['total_value'].sum()
                 else:
-                    st.warning("Could not calculate Inventory Value. 'total_value' column missing from stock data.")
-
-            # 5. Display KPIs in columns
-            
+                    st.warning("Could not calculate Inventory Value.")
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Revenue", f"฿{total_revenue:,.2f}")
@@ -487,32 +415,25 @@ else:
                 col5.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
                 col6.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
             
-            
             col7, col8, col9 = st.columns(3)
             col7.metric("Average Daily Sales", f"฿{avg_daily_sales:,.2f}")
             col8.metric("Profit Margin", f"{profit_margin_pct:,.2f}%")
             col9.metric("Avg. Daily Transactions", f"{avg_daily_transactions:,.2f}")
             
-            st.markdown("---") # Separator
+            st.markdown("---")
 
-            # --- 1. Prepare data for Trend Plot ---
             st.subheader("Overall Daily Sales & Profit Trend")
-
-            # Melt the dataframe for plotting
             df_melted = df_daily_stats.melt(
                 id_vars=['date'], 
                 value_vars=['daily_sales', 'daily_profit'], 
                 var_name='Metric', 
                 value_name='Amount (฿)'
             )
-            
-            # Rename for a cleaner legend
             df_melted['Metric'] = df_melted['Metric'].map({
                 'daily_sales': 'Total Sales',
                 'daily_profit': 'Total Profit'
             })
 
-            # Plot overall trend
             fig_trend = px.line(
                 df_melted,
                 x='date',
@@ -520,21 +441,15 @@ else:
                 color='Metric', 
                 title="Total Daily Sales & Profit Over Time",
                 labels={'date': 'Date', 'Amount (฿)': 'Amount (฿)'},
-                color_discrete_map={ 
-                    'Total Sales': 'blue', 
-                    'Total Profit': 'green'
-                }
+                color_discrete_map={'Total Sales': 'blue', 'Total Profit': 'green'}
             )
-            fig_trend.update_layout(xaxis_title="Date", yaxis_title="Amount (฿)")
             st.plotly_chart(fig_trend, use_container_width=True)
             
-            # 1. Aggregate transactions (nunique invoices) by date
             df_daily_transactions = df_filtered.groupby(df_filtered['datetime'].dt.date) \
                                               .agg(daily_transactions=('Invoice No', 'nunique')) \
                                               .reset_index()
             df_daily_transactions = df_daily_transactions.rename(columns={'datetime': 'date'})
 
-            # 2. Plot the bar chart
             fig_bar_transactions = px.bar(
                 df_daily_transactions,
                 x='date',
@@ -542,31 +457,24 @@ else:
                 title="Total Transactions Per Day",
                 labels={'date': 'Date', 'daily_transactions': 'Total Transactions'}
             )
-            fig_bar_transactions.update_layout(xaxis_title="Date", yaxis_title="Number of Transactions")
             st.plotly_chart(fig_bar_transactions, use_container_width=True)
 
 
-            # --- 2. Prophet Forecasting ---
+            # --- Prophet Forecasting ---
             st.subheader("Sales Forecast with Prophet")
-            
-            # Format for Prophet: needs 'ds' and 'y'
             df_prophet_revenue = df_daily_stats[['date', 'daily_sales']].rename(
                 columns={'date': 'ds', 'daily_sales': 'y'}
             )
             
-            # Check for sufficient data
             if len(df_prophet_revenue) < 5:
-                st.warning("Not enough daily data to generate a forecast. Please provide data spanning at least 5 different days.")
+                st.warning("Not enough daily data to generate a forecast.")
             else:
-                # Forecasting parameters
                 forecast_days = st.slider(
                     "Days to forecast into the future", 
-                    21, 365, 30, # <-- Min value set to 21
-                    key="forecast_days_slider",
-                    help="Must be at least 21 days to calculate the 3-week growth factor."
+                    21, 365, 30,
+                    key="forecast_days_slider"
                 )
                 
-                # Cache the forecast function
                 @st.cache_data
                 def get_prophet_forecast(data, periods):
                     m = Prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False)
@@ -575,76 +483,48 @@ else:
                     forecast = m.predict(future)
                     return m, forecast
 
-                # Run forecast
                 with st.spinner(f"Generating {forecast_days}-day forecast..."):
                     try:
-                        # --- Run the REVENUE forecast for plotting ---
                         m_revenue, forecast_revenue = get_prophet_forecast(df_prophet_revenue, forecast_days)
                         
-                        # --- [FIXED] Calculate and store growth factor ---
                         try:
-                            # 1. Get the last date from our sales data
                             last_actual_date = df_prophet_revenue['ds'].max()
-                            
-                            # 2. Convert it to a datetime object (at midnight) to match Prophet's 'ds' column
                             last_actual_date_dt = pd.to_datetime(last_actual_date)
-                            
-                            # 3. Calculate the future date, 28 days later
                             future_date_dt = last_actual_date_dt + pd.Timedelta(days=28)
                             
-                            # 4. Find the 'yhat' (prediction) for the last actual date
                             recent_pred_series = forecast_revenue.loc[forecast_revenue['ds'] == last_actual_date_dt, 'yhat']
                             future_pred_series = forecast_revenue.loc[forecast_revenue['ds'] == future_date_dt, 'yhat']
 
-                            if recent_pred_series.empty:
-                                st.warning(f"Could not find recent prediction for date {last_actual_date_dt}. Using default growth.")
-                                st.session_state.growth_factor = 1.0
-                            elif future_pred_series.empty:
-                                st.warning(f"Could not find future prediction for date {future_date_dt}. (Is forecast_days >= 21?). Using default growth.")
+                            if recent_pred_series.empty or future_pred_series.empty:
                                 st.session_state.growth_factor = 1.0
                             else:
                                 recent_pred = recent_pred_series.values[0]
                                 future_pred = future_pred_series.values[0]
-
                                 if recent_pred > 0 and future_pred > 0:
                                     st.session_state.growth_factor = future_pred / recent_pred
                                 else:
-                                    st.session_state.growth_factor = 1.0 # Default if predictions are zero
+                                    st.session_state.growth_factor = 1.0 
                         except Exception as e:
-                            st.warning(f"Could not calculate growth factor: {e}")
-                            st.session_state.growth_factor = 1.0 # Default
+                            st.session_state.growth_factor = 1.0
                         
-                        # --- [END FIXED] ---
-
                         st.subheader(f"{forecast_days}-Day Sales (Revenue) Forecast")
                         fig_forecast = plot_plotly(m_revenue, forecast_revenue)
-                        fig_forecast.update_layout(
-                            title=f"Daily Sales (Revenue) Forecast",
-                            xaxis_title="Date",
-                            yaxis_title="Forecasted Sales (฿)"
-                        )
                         st.plotly_chart(fig_forecast, use_container_width=True)
                         
                         st.subheader("Revenue Forecast Components")
-                        # Prophet's component plot uses matplotlib, so we use st.pyplot
                         fig_components = m_revenue.plot_components(forecast_revenue)
                         st.pyplot(fig_components)
                     
                     except Exception as e:
                         st.error(f"An error occurred during forecasting: {e}")
-                        st.error("This can happen if there isn't enough varied data (e.g., all sales on one day).")
 
-                # --- [NEW] Display the calculated growth factor ---
                 st.subheader("Forecasted Growth Factor")
                 st.metric("Predicted 4-Week Sales Growth (from trend)", f"{st.session_state.growth_factor:.2%}")
-                st.caption("This factor is applied to all stock suggestions in Tabs 5 & 6. It's calculated by comparing the forecasted trend 21 days from your last sale vs. the trend on your last sale day.")
 
-        # --- Tab 2: Busiest Times Heatmap (NEW SECOND TAB) ---
+        # --- Tab 2: Busiest Times Heatmap ---
         with tabs[1]:
             st.header("Busiest Times Heatmap")
-            st.markdown("This heatmap shows the number of unique transactions per hour and day of the week (9am-8pm).")
             
-            # Filter for the hours you requested (9am to 8pm -> 9 to 20)
             df_heatmap_base = df_filtered[
                 (df_filtered['hour_of_day'] >= 9) & (df_filtered['hour_of_day'] <= 20)
             ]
@@ -652,98 +532,73 @@ else:
             if df_heatmap_base.empty:
                 st.warning("No sales data found between 9 AM and 8 PM.")
             else:
-                # Group by day and hour, counting unique invoices
                 heatmap_data = df_heatmap_base.groupby(['day_of_week', 'hour_of_day'])['Invoice No'].nunique().reset_index()
                 
-                # Pivot the data for the heatmap
                 heatmap_pivot = heatmap_data.pivot(
                     index='day_of_week',
                     columns='hour_of_day',
                     values='Invoice No'
-                ).fillna(0) # Fill empty slots with 0 transactions
+                ).fillna(0)
                 
-                # Order the days and hours correctly
                 day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                hour_order = list(range(9, 21)) # 9am to 8pm
-                
+                hour_order = list(range(9, 21))
                 heatmap_pivot = heatmap_pivot.reindex(index=day_order, columns=hour_order, fill_value=0)
                 
-                # Create the Plotly heatmap
                 fig = px.imshow(
                     heatmap_pivot,
                     labels=dict(x="Hour of Day", y="Day of Week", color="Transactions"),
                     x=heatmap_pivot.columns,
                     y=heatmap_pivot.index,
-                    text_auto=True, # Show the numbers on the squares
+                    text_auto=True,
                     aspect="auto"
-                )
-                fig.update_layout(
-                    title="Hourly Sales Transactions by Day",
-                    xaxis_nticks=len(hour_order),
-                    yaxis_title=None,
-                    xaxis_title="Hour of Day (24h format)"
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # --- [NEW] Daily Summary Statistics Table ---
                 st.markdown("---")
                 st.subheader("Daily Summary Statistics (9am-8pm)")
                 
                 try:
-                    # 1. Aggregate daily stats (revenue and transactions)
                     daily_agg = df_heatmap_base.groupby(df_heatmap_base['datetime'].dt.date).agg(
                         daily_revenue=('Total Price After Discount', 'sum'),
                         daily_transactions=('Invoice No', 'nunique')
                     )
                     daily_agg['day_of_week'] = pd.to_datetime(daily_agg.index).day_name()
                     
-                    # 2. Calculate averages per day of week
                     day_summary = daily_agg.groupby('day_of_week').agg(
                         avg_revenue=('daily_revenue', 'mean'),
                         avg_transactions=('daily_transactions', 'mean')
                     )
                     
-                    # 3. Find busiest and quietest hours from the heatmap pivot table
                     busiest_hours = heatmap_pivot.idxmax(axis=1)
                     quietest_hours = heatmap_pivot.idxmin(axis=1)
                     
-                    # 4. Combine the stats
                     day_summary = day_summary.join(busiest_hours.rename('Busiest Hour (Transactions)'))
                     day_summary = day_summary.join(quietest_hours.rename('Quietest Hour (Transactions)'))
-                    
-                    # 5. Ensure correct order and all days are present
                     day_summary = day_summary.reindex(day_order)
                     
-                    # 6. Display the table
                     st.dataframe(
                         day_summary,
                         use_container_width=True,
                         column_config={
                             "avg_revenue": st.column_config.NumberColumn("Avg. Revenue", format="฿%.2f"),
-                            "avg_transactions": st.column_config.NumberColumn("Avg. Transactions", format="%.1f"),
-                            "Busiest Hour (Transactions)": st.column_config.TextColumn("Busiest Hour"),
-                            "Quietest Hour (Transactions)": st.column_config.TextColumn("Quietest Hour"),
+                            "avg_transactions": st.column_config.NumberColumn("Avg. Transactions", format="%.1f")
                         }
                     )
-                except Exception as e:
-                    st.warning(f"Could not generate daily summary table: {e}")
+                except Exception:
+                    pass
 
         # --- Tab 3: Product Performance ---
         with tabs[2]:
             st.header("Product Performance")
             st.markdown(f"Analyzed over **{num_days}** days of sales.")
             
-            # Group data by product
             product_performance = df_filtered.groupby('Product Name').agg(
                 total_quantity_sold=('Quantity Sold', 'sum'),
                 total_profit=('Total Profit', 'sum'),
                 total_revenue=('Total Price After Discount', 'sum')
             ).reset_index()
             
-            # --- Top Products ---
             st.subheader("Top Performing Products")
-            
-            # Select metric to sort by
             sort_by = st.selectbox("Sort top products by:", ["Total Profit", "Total Quantity Sold", "Total Revenue"], index=0)
             
             if sort_by == "Total Profit":
@@ -756,279 +611,163 @@ else:
                 sorted_products = product_performance.sort_values(by='total_revenue', ascending=False)
                 chart_col = 'total_revenue'
 
-            # --- KPIs ---
             col1, col2 = st.columns(2)
             if not sorted_products.empty:
                 best_product = sorted_products.iloc[0]
-                col1.metric(
-                    f"Best Product (by {sort_by})",
-                    best_product['Product Name'],
-                )
-                col2.metric(
-                    f"Value (by {sort_by})",
-                    f"฿{best_product[chart_col]:,.2f}" if chart_col != 'total_quantity_sold' else f"{best_product[chart_col]:,.0f} Units"
-                )
-            else:
-                col1.metric(f"Best Product (by {sort_by})", "N/A")
-                col2.metric(f"Value (by {sort_by})", "N/A")
+                col1.metric(f"Best Product (by {sort_by})", best_product['Product Name'])
+                col2.metric(f"Value (by {sort_by})", f"฿{best_product[chart_col]:,.2f}" if chart_col != 'total_quantity_sold' else f"{best_product[chart_col]:,.0f} Units")
 
-
-            # --- Bar Chart of Top 10 ---
             st.subheader("Top 10 Products")
             top_10_products = sorted_products.head(10)
             
-            if top_10_products.empty:
-                st.warning("No product data to display.")
-            else:
+            if not top_10_products.empty:
                 fig_bar = px.bar(
                     top_10_products,
                     x='Product Name',
                     y=chart_col,
                     title=f"Top 10 Products by {sort_by}",
-                    labels={'Product Name': 'Product', chart_col: sort_by},
                     text_auto=True
                 )
-                fig_bar.update_layout(xaxis_title=None)
                 st.plotly_chart(fig_bar, use_container_width=True)
             
-            # --- Full Data Table ---
             with st.expander("View All Product Performance Data"):
                 st.dataframe(sorted_products, use_container_width=True)
 
         # --- Tab 4: Customer Purchase Insights ---
         with tabs[3]:
             st.header("🛒 Customer Purchase Insights")
-            st.markdown("Understand how customers bundle items in a single transaction.")
             
-            # --- 1. Calculate and display KPIs ---
             aov, items_per_tx, total_tx = get_transaction_kpis(df_filtered)
-            st.subheader("High-Level Metrics")
-            
             col1, col2, col3 = st.columns(3)
             col1.metric("Average Order Value (AOV)", f"฿{aov:,.2f}")
             col2.metric("Avg. Items per Transaction", f"{items_per_tx:,.2f}")
             col3.metric("Total Transactions", f"{total_tx:,}")
 
             st.markdown("---")
-            
-            # --- 2. Co-Purchase Finder ---
             st.subheader("What products are bought together?")
-            st.markdown("Select a product to see the top 5 other items most frequently purchased in the same transaction.")
             
-            # Get a list of top 200 products by sales for the dropdown to keep it manageable
             top_product_list = df_filtered['Product Name'].value_counts().head(200).index.tolist()
             
-            if not top_product_list:
-                st.warning("No products available to select.")
-            else:
-                selected_product = st.selectbox(
-                    "Select a product:",
-                    options=top_product_list
-                )
-                
+            if top_product_list:
+                selected_product = st.selectbox("Select a product:", options=top_product_list)
                 if selected_product:
-                    # Get the co-purchase data
                     co_purchase_data = get_common_co_purchases(df_filtered, selected_product, top_n=5)
-                    
-                    if co_purchase_data.empty:
-                        st.info(f"No other products were frequently purchased with '{selected_product}'.")
-                    else:
-                        # Create the bar chart
+                    if not co_purchase_data.empty:
                         fig_co = px.bar(
                             co_purchase_data,
                             x='count',
                             y='Product Name',
                             orientation='h',
-                            title=f"Top 5 Products Bought With '{selected_product}'",
-                            labels={'count': 'Number of Transactions', 'Product Name': 'Product'}
+                            title=f"Top 5 Products Bought With '{selected_product}'"
                         )
-                        fig_co.update_layout(yaxis=dict(autorange="reversed")) # Show top item at the top
+                        fig_co.update_layout(yaxis=dict(autorange="reversed"))
                         st.plotly_chart(fig_co, use_container_width=True)
 
         # --- Tab 5: Inventory Insights ---
         with tabs[4]:
             st.header("Inventory Insights & Sales Velocity")
-            
-            # --- [NEW] Get growth factor from session state ---
             growth_factor = st.session_state.growth_factor
             
-            st.markdown(f"Calculations are based on the total sales over **{num_days}** days of data provided.")
-            
-            # Group by Barcode and Name
             group_cols = ['Product Name', 'Product Barcode']
-
             inventory_stats = df_filtered.groupby(group_cols).agg(
                 total_quantity_sold=('Quantity Sold', 'sum'),
             ).reset_index()
             
-            # --- Rename 'Product Barcode' to 'Barcode' for merging ---
             inventory_stats.rename(columns={'Product Barcode': 'Barcode'}, inplace=True)
+            # The Barcodes are already cleaned in load_data, but we ensure string type for display
+            inventory_stats['Barcode'] = inventory_stats['Barcode'].astype(str)
             
-            # --- FIX: Robust Barcode Cleaning ---
-            # Ensure Barcode is string for merging, even for UTC items
-            inventory_stats['Barcode'] = inventory_stats['Barcode'].astype(str).str.strip()
-            
-            # Calculate sales velocity
             inventory_stats['avg_daily_sales'] = inventory_stats['total_quantity_sold'] / num_days
             inventory_stats['avg_weekly_sales'] = inventory_stats['avg_daily_sales'] * 7
             
-            # Add stocking suggestion
             st.subheader("Stocking Suggestions")
+            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (adj. by {growth_factor:.2%} growth).")
             
-            # --- [MODIFIED] Updated helper text ---
-            st.markdown(f"`Suggested Stock Level` is based on **{lead_time_weeks} weeks** of safety stock (set in sidebar).")
-            st.markdown(f"It has also been adjusted by a **{growth_factor:.2%}** growth factor based on the sales forecast in Tab 1.")
-            
-            # --- [MODIFIED] Apply growth factor to calculation ---
             inventory_stats['suggested_stock_level'] = (inventory_stats['avg_weekly_sales'] * lead_time_weeks) * growth_factor
-            
-            # --- [NEW] Round up suggested stock ---
             inventory_stats['suggested_stock_level'] = np.ceil(inventory_stats['suggested_stock_level'])
             
-            # Format for display
-            inventory_display = inventory_stats.copy()
-            
             st.dataframe(
-                inventory_display.sort_values(by='avg_weekly_sales', ascending=False),
+                inventory_stats.sort_values(by='avg_weekly_sales', ascending=False),
                 use_container_width=True,
                 column_config={
-                    "Product Name": st.column_config.TextColumn("Product Name", width="large"),
                     "Barcode": st.column_config.TextColumn("Barcode"),
-                    "total_quantity_sold": st.column_config.NumberColumn("Total Sold", format="%d units"),
-                    "avg_daily_sales": st.column_config.NumberColumn("Avg. Daily Sales", format="%.2f"),
                     "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
-                    # --- [MODIFIED] ---
-                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock (Adj.)", format="%.0f units"),
+                    "suggested_stock_level": st.column_config.NumberColumn(f"Suggested {lead_time_weeks}-Week Stock", format="%.0f units"),
                 }
             )
         
-        # --- Tab 6: Reorder & Stock Check (Conditional) ---
+        # --- Tab 6: Reorder & Stock Check ---
         if stock_file is not None:
             with tabs[5]:
                 st.header("Stock vs. Forecasted Demand")
-                
-                # --- [NEW] Get growth factor from session state ---
                 growth_factor = st.session_state.growth_factor
                 
-                # Load stock data
-                # df_stock is already loaded from the top
-                
                 if df_stock is not None:
-                    
-                    # --- [NEW] Filter out UTC items for this tab ONLY ---
-                    # We identify UTC items by their 'Product Barcode' starting with "UTC_"
-                    # We must filter df_filtered *before* grouping.
+                    # Filter out UTC items for Restock analysis
                     df_restock_sales_data = df_filtered[
                         ~df_filtered['Product Barcode'].astype(str).str.startswith('UTC_')
                     ]
                     
                     if df_restock_sales_data.empty:
                         st.warning("No non-UTC sales data found to calculate restock levels.")
-                        # Stop execution for this tab if no data
                     else:
-                        # --- [NEW] Recalculate inventory_stats from non-UTC data ---
                         group_cols = ['Product Name', 'Product Barcode']
                         inventory_stats_restock = df_restock_sales_data.groupby(group_cols).agg(
                             total_quantity_sold=('Quantity Sold', 'sum'),
                         ).reset_index()
 
                         inventory_stats_restock.rename(columns={'Product Barcode': 'Barcode'}, inplace=True)
-                        inventory_stats_restock['Barcode'] = inventory_stats_restock['Barcode'].astype(str).str.strip()
-
-                        # --- [NEW] Calculate velocity from this new dataframe ---
+                        # Barcodes are already cleaned from load_data
+                        
                         inventory_stats_restock['avg_daily_sales'] = inventory_stats_restock['total_quantity_sold'] / num_days
                         inventory_stats_restock['avg_weekly_sales'] = inventory_stats_restock['avg_daily_sales'] * 7
+                        inventory_stats_restock['suggested_stock_level'] = np.ceil((inventory_stats_restock['avg_weekly_sales'] * lead_time_weeks) * growth_factor)
                         
-                        # --- [MODIFIED] Apply growth factor ---
-                        inventory_stats_restock['suggested_stock_level'] = (inventory_stats_restock['avg_weekly_sales'] * lead_time_weeks) * growth_factor
-                        
-                        # --- [NEW] Round up suggested stock ---
-                        inventory_stats_restock['suggested_stock_level'] = np.ceil(inventory_stats_restock['suggested_stock_level'])
-
-                        # --- [MODIFIED] Merge using the new 'inventory_stats_restock' ---
-                        # We only need 'Barcode' and 'Stock' from the full df_stock
+                        # --- MERGE ---
+                        # Because we used clean_barcode() on both, the join keys should now match
                         df_merged = pd.merge(
-                            inventory_stats_restock, # <-- CHANGED
-                            df_stock[['Barcode', 'Stock']], # From stock data
+                            inventory_stats_restock,
+                            df_stock[['Barcode', 'Stock']], 
                             on='Barcode',
                             how='left' 
                         )
                         
-                        # Calculate the deficit
-                        # Fillna(0) for items sold but not in stock file
                         df_merged['Stock'] = df_merged['Stock'].fillna(0)
                         df_merged['deficit'] = df_merged['suggested_stock_level'] - df_merged['Stock']
-                        
-                        # --- [NEW] Round up deficit ---
                         df_merged['deficit'] = np.ceil(df_merged['deficit'])
                         
                         st.subheader("Reorder List")
-                        # --- [MODIFIED] Updated helper text ---
-                        st.markdown(f"This list shows items where your `Current Stock` is *less* than the `Suggested Stock Level`.")
-                        st.markdown(f"(Suggested level is based on **{lead_time_weeks} weeks** of safety stock, adjusted by the **{growth_factor:.2%}** forecast growth factor from Tab 1).")
                         
-                        # Filter for items that need reordering
                         df_reorder = df_merged[df_merged['deficit'] > 0].sort_values(by='deficit', ascending=False)
-                        
-                        # --- [NEW] "Already Ordered" Ticking logic ---
                         all_reorder_products = df_reorder['Product Name'].unique()
                         
                         if 'ordered_list' not in st.session_state:
                             st.session_state.ordered_list = []
 
-                        # Filter session state to only include items still in the reorder list
-                        st.session_state.ordered_list = [
-                            p for p in st.session_state.ordered_list if p in all_reorder_products
-                        ]
+                        st.session_state.ordered_list = [p for p in st.session_state.ordered_list if p in all_reorder_products]
 
                         ordered_items = st.multiselect(
                             "Mark items as 'Already Ordered' (to hide from list):",
                             options=all_reorder_products,
-                            key='ordered_list' # Use session state to remember
+                            key='ordered_list'
                         )
                         
-                        # Filter the dataframe to hide the "ticked" items
-                        df_reorder_to_display = df_reorder[
-                            ~df_reorder['Product Name'].isin(ordered_items)
-                        ]
+                        df_reorder_to_display = df_reorder[~df_reorder['Product Name'].isin(ordered_items)]
                         
-                        # --- [MODIFIED] Display the filtered dataframe ---
                         st.dataframe(
-                            df_reorder_to_display, # <-- CHANGED
+                            df_reorder_to_display, 
                             use_container_width=True,
                             column_config={
                                 "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
                                 "Barcode": st.column_config.TextColumn("Barcode"),
                                 "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                # --- [MODIFIED] ---
                                 "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock (Adj.)", format="%.0f units"),
                                 "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
-                                "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
-                                "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
                             }
                         )
-                        
-                        # --- [NEW] Show a list of items you've marked as ordered ---
-                        if ordered_items:
-                            st.subheader("Already Ordered (Hidden from list above)")
-                            st.dataframe(
-                                df_reorder[df_reorder['Product Name'].isin(ordered_items)],
-                                use_container_width=True,
-                                column_config={
-                                    "Product Name": st.column_config.TextColumn("Product Name (from Sales)", width="large"),
-                                    "Barcode": st.column_config.TextColumn("Barcode"),
-                                    "Stock": st.column_config.NumberColumn("Current Stock", format="%.0f units"),
-                                    # --- [MODIFIED] ---
-                                    "suggested_stock_level": st.column_config.NumberColumn("Suggested Stock (Adj.)", format="%.0f units"),
-                                    "deficit": st.column_config.NumberColumn("Need to Order", format="%.0f units"),
-                                    "avg_weekly_sales": st.column_config.NumberColumn("Avg. Weekly Sales", format="%.2f"),
-                                    "total_quantity_sold": st.column_config.NumberColumn("Total Sold"),
-                                }
-                            )
                         
                         with st.expander("View Full Stock-Sales Comparison (All Non-UTC Items)"):
                             st.dataframe(df_merged.sort_values(by='deficit', ascending=False), use_container_width=True)
         
-        # Add a warning in the sidebar if stock file is missing
-        elif uploaded_file is not None or utc_file is not None: # Only show if sales is loaded but stock isn't
-            st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab and 'Total Inventory Value' KPI.")
+        elif uploaded_file is not None or utc_file is not None:
+            st.sidebar.warning("Upload your stock file to enable the 'Reorder & Stock Check' tab.")
